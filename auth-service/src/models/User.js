@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+const mongoose
 const bcrypt = require('bcrypt');
 
 const MALE_BLOCKS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T'];
