@@ -2,6 +2,7 @@ const axios = require("axios");
 
 const PAYMENT_EVENT_URL = process.env.PAYMENT_EVENT_URL || "";
 const ANALYTICS_EVENT_URL = process.env.ANALYTICS_EVENT_URL || "";
+const INTERNAL_SERVICE_SECRET = process.env.INTERNAL_SERVICE_SECRET || "";
 
 async function dispatch(url, eventType, payload) {
   if (!url) {
@@ -16,7 +17,14 @@ async function dispatch(url, eventType, payload) {
         payload,
         emittedAt: new Date().toISOString(),
       },
-      { timeout: 4000 }
+      {
+        timeout: 4000,
+        headers: INTERNAL_SERVICE_SECRET
+          ? {
+              "x-internal-secret": INTERNAL_SERVICE_SECRET,
+            }
+          : {},
+      }
     );
   } catch (error) {
     console.warn(`Event dispatch failed for ${eventType} to ${url}:`, error.message);

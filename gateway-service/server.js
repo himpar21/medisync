@@ -1,15 +1,16 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const { buildServiceRegistry } = require("./src/config/serviceRegistry");
+const { gatewayAuth } = require("./src/middlewares/authMiddleware");
 
 const app = express();
-
-const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || "http://127.0.0.1:5001";
-const ORDER_SERVICE_URL = process.env.ORDER_SERVICE_URL || "http://127.0.0.1:5003";
+const serviceRegistry = buildServiceRegistry();
 
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(gatewayAuth);
 
 function copyForwardHeaders(req) {
   const headers = { ...req.headers };
@@ -63,24 +64,16 @@ async function forwardRequest(req, res, targetBaseUrl) {
   res.status(upstreamResponse.status).send(responseBuffer);
 }
 
-app.use("/api/auth", async (req, res) => {
-  try {
-    await forwardRequest(req, res, AUTH_SERVICE_URL);
-  } catch (error) {
-    const detail = error?.cause?.message || error.message;
-    console.error("Gateway auth proxy error:", detail);
-    res.status(502).json({ message: "Auth service unavailable" });
-  }
-});
-
-app.use("/api/orders", async (req, res) => {
-  try {
-    await forwardRequest(req, res, ORDER_SERVICE_URL);
-  } catch (error) {
-    const detail = error?.cause?.message || error.message;
-    console.error("Gateway order proxy error:", detail);
-    res.status(502).json({ message: "Order service unavailable" });
-  }
+serviceRegistry.forEach((service) => {
+  app.use(service.prefix, async (req, res) => {
+    try {
+      await forwardRequest(req, res, service.target);
+    } catch (error) {
+      const detail = error?.cause?.message || error.message;
+      console.error(`Gateway proxy error (${service.key}):`, detail);
+      res.status(502).json({ message: `${service.key} service unavailable` });
+    }
+  });
 });
 
 app.get("/health", (req, res) => {
@@ -88,7 +81,12 @@ app.get("/health", (req, res) => {
     service: "gateway-service",
     status: "ok",
     timestamp: new Date().toISOString(),
+    routes: serviceRegistry.map((service) => service.prefix),
   });
+});
+
+app.use((req, res) => {
+  res.status(404).json({ message: "Route not found in API Gateway" });
 });
 
 const PORT = process.env.PORT || 5000;

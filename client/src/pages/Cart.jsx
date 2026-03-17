@@ -3,37 +3,33 @@ import { Link, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { CartContext } from "../context/CartContext";
 import { AuthContext } from "../context/AuthContext";
-
-const STATIC_ADDRESS_OPTIONS = ["SJT", "TT", "SMV", "Main Building", "MGR"];
+import CustomSelect from "../components/common/CustomSelect";
+import MedicineBrowseBar from "../components/common/MedicineBrowseBar";
+import { getMedicineById } from "../services/inventoryService";
+import { buildAddressConfig } from "../utils/addressOptions";
 
 const Cart = () => {
   const { cart, updateItem, removeItem, clearCart, loading } = useContext(CartContext);
   const { user } = useContext(AuthContext);
   const navigate = useNavigate();
+  const [resolvedImages, setResolvedImages] = useState({});
   const [manualHostelBlock, setManualHostelBlock] = useState(() =>
     String(localStorage.getItem("manualHostelBlock") || "").trim().toUpperCase()
   );
   const [manualHostelRoomNo, setManualHostelRoomNo] = useState(() =>
     String(localStorage.getItem("manualHostelRoomNo") || "").trim()
   );
-
-  const userBlock = String(user?.block || localStorage.getItem("block") || "").trim();
-  const userRoomNo = String(user?.roomNo || localStorage.getItem("roomNo") || "").trim();
-  const effectiveBlock = userBlock || manualHostelBlock;
-  const effectiveRoomNo = userRoomNo || manualHostelRoomNo;
-  const hasHostelAddress = Boolean(effectiveBlock && effectiveRoomNo);
-  const isPatientUser = user?.role === "patient";
-  const hostelAddressLabel = hasHostelAddress
-    ? `Hostel Room - ${effectiveBlock} ${effectiveRoomNo}`
-    : "Hostel Room - Enter Block and Room No";
-  const showManualHostelEntry = isPatientUser && !hasHostelAddress;
-  const addressOptions = useMemo(() => {
-    const options = [...STATIC_ADDRESS_OPTIONS];
-    if (isPatientUser) {
-      options.unshift(hostelAddressLabel);
-    }
-    return options;
-  }, [isPatientUser, hostelAddressLabel]);
+  const addressConfig = useMemo(
+    () => buildAddressConfig(user, manualHostelBlock, manualHostelRoomNo),
+    [user, manualHostelBlock, manualHostelRoomNo]
+  );
+  const {
+    options: addressOptions,
+    hostelAddressLabel,
+    hasHostelAddress,
+    isPatientUser,
+    showManualHostelEntry,
+  } = addressConfig;
 
   const [selectedAddress, setSelectedAddress] = useState(() => {
     const saved = localStorage.getItem("selectedAddress");
@@ -77,6 +73,74 @@ const Cart = () => {
 
   const isHostelPlaceholderSelected =
     isPatientUser && !hasHostelAddress && selectedAddress === hostelAddressLabel;
+  const subtotal = Number(cart.subtotal || 0);
+  const tax = Number((subtotal * 0.05).toFixed(2));
+  const total = Number((subtotal + tax).toFixed(2));
+
+  useEffect(() => {
+    if (!cart.items.length) {
+      setResolvedImages({});
+      return;
+    }
+
+    const knownItemIds = new Set(cart.items.map((item) => String(item.medicineId)));
+    setResolvedImages((current) => {
+      const nextEntries = Object.entries(current).filter(([medicineId]) => knownItemIds.has(medicineId));
+      if (nextEntries.length === Object.keys(current).length) {
+        return current;
+      }
+      return Object.fromEntries(nextEntries);
+    });
+  }, [cart.items]);
+
+  useEffect(() => {
+    const missingItems = cart.items.filter(
+      (item) =>
+        !String(item.imageData || "").trim() &&
+        item.medicineId &&
+        !Object.prototype.hasOwnProperty.call(resolvedImages, String(item.medicineId))
+    );
+
+    if (!missingItems.length) {
+      return undefined;
+    }
+
+    let isActive = true;
+
+    const loadImages = async () => {
+      const fetchedEntries = await Promise.all(
+        missingItems.map(async (item) => {
+          try {
+            const medicine = await getMedicineById(item.medicineId);
+            return [String(item.medicineId), String(medicine?.imageData || "").trim()];
+          } catch (_error) {
+            return [String(item.medicineId), ""];
+          }
+        })
+      );
+
+      if (!isActive) {
+        return;
+      }
+
+      setResolvedImages((current) => {
+        const next = { ...current };
+        fetchedEntries.forEach(([medicineId, imageData]) => {
+          next[medicineId] = imageData;
+        });
+        return next;
+      });
+    };
+
+    loadImages();
+
+    return () => {
+      isActive = false;
+    };
+  }, [cart.items, resolvedImages]);
+
+  const getCartImage = (item) =>
+    String(item.imageData || "").trim() || String(resolvedImages[String(item.medicineId)] || "").trim();
 
   const onUpdateQuantity = async (medicineId, quantity) => {
     try {
@@ -104,8 +168,19 @@ const Cart = () => {
     }
   };
 
+  const onAdjustQuantity = (medicineId, currentQuantity, delta) => {
+    const normalizedCurrentQuantity = Math.max(1, Math.min(20, Number(currentQuantity || 1)));
+    const nextQuantity = Math.max(1, Math.min(20, normalizedCurrentQuantity + delta));
+    if (nextQuantity === normalizedCurrentQuantity) {
+      return;
+    }
+
+    onUpdateQuantity(medicineId, nextQuantity);
+  };
+
   return (
-    <main className="page-wrap">
+    <main className="page-wrap cart-page">
+      <MedicineBrowseBar />
       <h1 className="page-title">Your Cart</h1>
       <p className="page-subtitle">Review medicines and proceed to checkout.</p>
 
@@ -114,108 +189,154 @@ const Cart = () => {
           <p className="muted" style={{ marginTop: 0 }}>
             Your cart is empty.
           </p>
-          <Link className="btn-primary" to="/">
+          <Link className="btn-primary" to="/shop">
             Continue Shopping
           </Link>
         </section>
       ) : (
-        <>
-          <section className="panel">
+        <section className="cart-layout">
+          <section className="panel cart-items-panel">
             {cart.items.map((item) => (
-              <div key={item.medicineId} className="cart-row">
-                <div className="stack">
-                  <strong>{item.medicineName}</strong>
-                  <span className="muted">{item.category}</span>
+              <article key={item.medicineId} className="cart-item-card">
+                <div className="cart-item-shell">
+                  <div className="cart-item-media">
+                    {getCartImage(item) ? (
+                      <img
+                        src={getCartImage(item)}
+                        alt={item.medicineName}
+                        className="cart-item-image"
+                      />
+                    ) : (
+                      <div className="cart-item-image cart-item-image-placeholder">
+                        <span>No Image</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="cart-item-main">
+                    <div className="cart-item-head">
+                      <div className="stack cart-item-info">
+                        <div className="cart-item-title-row">
+                          <strong className="cart-item-name">{item.medicineName}</strong>
+                          <span className="chip">{item.category}</span>
+                        </div>
+                      </div>
+
+                      <button
+                        className="btn-danger cart-remove-btn"
+                        type="button"
+                        onClick={() => onRemove(item.medicineId)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+
+                    <div className="cart-item-metrics">
+                      <div className="cart-metric-card">
+                        <span className="muted">Unit Price</span>
+                        <strong>Rs {Number(item.unitPrice).toFixed(2)}</strong>
+                      </div>
+
+                      <div className="cart-metric-card cart-metric-input-card">
+                        <span className="muted cart-item-qty-label">
+                          Quantity
+                        </span>
+                        <div className="qty-stepper cart-qty-stepper" id={`cart-qty-${item.medicineId}`}>
+                          <button
+                            type="button"
+                            className="qty-btn cart-qty-step-btn"
+                            disabled={loading || item.quantity <= 1}
+                            onClick={() => onAdjustQuantity(item.medicineId, item.quantity, -1)}
+                            aria-label={`Decrease quantity for ${item.medicineName}`}
+                          >
+                            -
+                          </button>
+                          <span className="qty-value cart-qty-value">{item.quantity}</span>
+                          <button
+                            type="button"
+                            className="qty-btn cart-qty-step-btn"
+                            disabled={loading || item.quantity >= 20}
+                            onClick={() => onAdjustQuantity(item.medicineId, item.quantity, 1)}
+                            aria-label={`Increase quantity for ${item.medicineName}`}
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="cart-metric-card cart-metric-card-accent">
+                        <span className="muted">Total</span>
+                        <strong>Rs {Number(item.lineTotal).toFixed(2)}</strong>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <div className="hide-mobile">
-                  Rs {Number(item.unitPrice).toFixed(2)}
-                </div>
-                <div>
-                  <input
-                    className="input"
-                    type="number"
-                    min={1}
-                    max={20}
-                    value={item.quantity}
-                    style={{ width: "78px" }}
-                    onChange={(event) =>
-                      onUpdateQuantity(item.medicineId, Number(event.target.value))
-                    }
-                  />
-                </div>
-                <div>
-                  <strong>Rs {Number(item.lineTotal).toFixed(2)}</strong>
-                </div>
-                <button
-                  className="btn-danger"
-                  type="button"
-                  onClick={() => onRemove(item.medicineId)}
-                >
-                  Remove
-                </button>
-              </div>
+              </article>
             ))}
           </section>
 
-          <section className="panel" style={{ marginTop: "14px", padding: "16px" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                flexWrap: "wrap",
-                gap: "12px",
-              }}
-            >
-              <div className="stack">
+          <aside className="cart-side-column">
+            <section className="panel cart-address-panel">
+              <div className="cart-side-head">
+                <h3 className="cart-side-title">Pickup Address</h3>
+              </div>
+              <div className="cart-address-block">
+                <label htmlFor="address-select" className="muted cart-address-label">
+                  Select Address
+                </label>
+                <CustomSelect
+                  id="address-select"
+                  value={selectedAddress}
+                  options={addressOptions}
+                  onChange={setSelectedAddress}
+                />
+                {showManualHostelEntry ? (
+                  <div className="cart-address-inline">
+                    <input
+                      className="input"
+                      placeholder="Block"
+                      style={{ width: "82px", textTransform: "uppercase" }}
+                      value={manualHostelBlock}
+                      onChange={(event) =>
+                        setManualHostelBlock(event.target.value.toUpperCase().slice(0, 4))
+                      }
+                    />
+                    <input
+                      className="input"
+                      placeholder="Room No"
+                      style={{ width: "128px" }}
+                      value={manualHostelRoomNo}
+                      onChange={(event) => setManualHostelRoomNo(event.target.value.slice(0, 20))}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </section>
+
+            <section className="panel cart-summary-panel">
+              <div className="cart-side-head">
+                <h3 className="cart-side-title">Billing Summary</h3>
+              </div>
+
+              <div className="cart-summary-stack">
                 <span className="muted">Total Items: {cart.totalItems}</span>
-                <strong style={{ fontSize: "1.2rem" }}>
-                  Subtotal: Rs {Number(cart.subtotal).toFixed(2)}
-                </strong>
-                <div style={{ marginTop: "6px" }}>
-                  <label
-                    htmlFor="address-select"
-                    className="muted"
-                    style={{ display: "block", marginBottom: "4px" }}
-                  >
-                    Select Address
-                  </label>
-                  <select
-                    id="address-select"
-                    className="select"
-                    style={{ minWidth: "220px" }}
-                    value={selectedAddress}
-                    onChange={(event) => setSelectedAddress(event.target.value)}
-                  >
-                    {addressOptions.map((addressOption) => (
-                      <option key={addressOption} value={addressOption}>
-                        {addressOption}
-                      </option>
-                    ))}
-                  </select>
-                  {showManualHostelEntry ? (
-                    <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
-                      <input
-                        className="input"
-                        placeholder="Block"
-                        style={{ width: "82px", textTransform: "uppercase" }}
-                        value={manualHostelBlock}
-                        onChange={(event) =>
-                          setManualHostelBlock(event.target.value.toUpperCase().slice(0, 4))
-                        }
-                      />
-                      <input
-                        className="input"
-                        placeholder="Room No"
-                        style={{ width: "128px" }}
-                        value={manualHostelRoomNo}
-                        onChange={(event) => setManualHostelRoomNo(event.target.value.slice(0, 20))}
-                      />
-                    </div>
-                  ) : null}
+                <div className="cart-billing-list">
+                  <div className="cart-billing-row">
+                    <span>Subtotal:</span>
+                    <strong>Rs {subtotal.toFixed(2)}</strong>
+                  </div>
+                  <div className="cart-billing-row">
+                    <span>Tax (5%):</span>
+                    <strong>Rs {tax.toFixed(2)}</strong>
+                  </div>
+                  <div className="cart-billing-row cart-billing-total">
+                    <span>Total:</span>
+                    <strong>Rs {total.toFixed(2)}</strong>
+                  </div>
                 </div>
               </div>
-              <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+
+              <div className="cart-action-row">
                 <button className="btn-secondary" type="button" onClick={onClear}>
                   Clear Cart
                 </button>
@@ -228,9 +349,9 @@ const Cart = () => {
                   Proceed to Checkout
                 </button>
               </div>
-            </div>
-          </section>
-        </>
+            </section>
+          </aside>
+        </section>
       )}
     </main>
   );

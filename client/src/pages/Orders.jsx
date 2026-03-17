@@ -1,7 +1,10 @@
-import React, { useEffect, useState } from "react";
+import React, { useContext, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
-import { addCartItem, fetchOrders } from "../services/orderService";
+import { fetchOrders } from "../services/orderService";
+import MedicineBrowseBar from "../components/common/MedicineBrowseBar";
+import { getMedicineById } from "../services/inventoryService";
+import { CartContext } from "../context/CartContext";
 
 const STAR_VALUES = [1, 2, 3, 4, 5];
 
@@ -67,6 +70,7 @@ const Orders = () => {
     experience: 0,
     products: {},
   });
+  const [resolvedImages, setResolvedImages] = useState({});
   const [orderRatings, setOrderRatings] = useState(() => {
     try {
       const stored = localStorage.getItem("orderRatings");
@@ -75,6 +79,7 @@ const Orders = () => {
       return {};
     }
   });
+  const { addItem, refreshCart } = useContext(CartContext);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -109,6 +114,85 @@ const Orders = () => {
     }
   }, [orderRatings]);
 
+  useEffect(() => {
+    if (!orders.length) {
+      setResolvedImages({});
+      return;
+    }
+
+    const knownMedicineIds = new Set(
+      orders.flatMap((order) => order.items.map((item) => String(item.medicineId || "").trim())).filter(Boolean)
+    );
+
+    setResolvedImages((current) => {
+      const nextEntries = Object.entries(current).filter(([medicineId]) => knownMedicineIds.has(medicineId));
+      if (nextEntries.length === Object.keys(current).length) {
+        return current;
+      }
+      return Object.fromEntries(nextEntries);
+    });
+  }, [orders]);
+
+  useEffect(() => {
+    const missingMedicineIds = [
+      ...new Set(
+        orders
+          .flatMap((order) => order.items)
+          .map((item) => ({
+            medicineId: String(item.medicineId || "").trim(),
+            imageData: String(item.imageData || "").trim(),
+          }))
+          .filter(
+            (item) =>
+              item.medicineId &&
+              !item.imageData &&
+              !Object.prototype.hasOwnProperty.call(resolvedImages, item.medicineId)
+          )
+          .map((item) => item.medicineId)
+      ),
+    ];
+
+    if (!missingMedicineIds.length) {
+      return undefined;
+    }
+
+    let isActive = true;
+
+    const loadImages = async () => {
+      const fetchedEntries = await Promise.all(
+        missingMedicineIds.map(async (medicineId) => {
+          try {
+            const medicine = await getMedicineById(medicineId);
+            return [medicineId, String(medicine?.imageData || "").trim()];
+          } catch (_error) {
+            return [medicineId, ""];
+          }
+        })
+      );
+
+      if (!isActive) {
+        return;
+      }
+
+      setResolvedImages((current) => {
+        const next = { ...current };
+        fetchedEntries.forEach(([medicineId, imageData]) => {
+          next[medicineId] = imageData;
+        });
+        return next;
+      });
+    };
+
+    loadImages();
+
+    return () => {
+      isActive = false;
+    };
+  }, [orders, resolvedImages]);
+
+  const getOrderItemImage = (item) =>
+    String(item.imageData || "").trim() || String(resolvedImages[String(item.medicineId || "").trim()] || "").trim();
+
   const onRateOrder = (event, order) => {
     event.stopPropagation();
     const savedRating = normalizeSavedOrderRating(orderRatings[order.id]);
@@ -137,11 +221,9 @@ const Orders = () => {
     setReorderingOrderId(order.id);
     try {
       for (const item of order.items) {
-        await addCartItem({
-          medicineId: item.medicineId,
-          quantity: item.quantity,
-        });
+        await addItem(item.medicineId, item.quantity);
       }
+      await refreshCart();
       toast.success("Items added to cart");
       navigate("/cart");
     } catch (err) {
@@ -149,6 +231,11 @@ const Orders = () => {
     } finally {
       setReorderingOrderId(null);
     }
+  };
+
+  const onCompletePayment = (event, order) => {
+    event.stopPropagation();
+    navigate(`/payments/${order.id}`, { state: { order } });
   };
 
   const onCloseRatingModal = () => {
@@ -209,7 +296,8 @@ const Orders = () => {
   };
 
   return (
-    <main className="page-wrap">
+    <main className="page-wrap orders-page">
+      <MedicineBrowseBar />
       <h1 className="page-title">Order History</h1>
       <p className="page-subtitle">Track status and pickup details for each order.</p>
 
@@ -221,23 +309,17 @@ const Orders = () => {
           <p className="muted" style={{ marginTop: 0 }}>
             No orders found.
           </p>
-          <Link to="/" className="btn-primary">
+          <Link to="/shop" className="btn-primary">
             Start Shopping
           </Link>
         </section>
       ) : null}
 
-      <section className="grid" style={{ marginTop: "14px" }}>
+      <section className="grid orders-list" style={{ marginTop: "14px" }}>
         {orders.map((order) => {
           const isExpanded = expandedOrderId === order.id;
-          const medicineCount = order.items.length;
-          const firstMedicineName = order.items[0]?.medicineName || "Medicine";
           const savedRating = normalizeSavedOrderRating(orderRatings[order.id]);
           const orderIdLabel = order.orderNumber || order.id;
-          const medicineSummary =
-            medicineCount > 1
-              ? `${firstMedicineName} +${medicineCount - 1} more`
-              : firstMedicineName;
           const subtotal = Number(
             order.subtotal ??
               order.items.reduce((sum, item) => sum + Number(item.lineTotal || 0), 0)
@@ -250,36 +332,59 @@ const Orders = () => {
           return (
             <article
               key={order.id}
-              className="panel"
+              className="panel order-card"
               onClick={() => setExpandedOrderId(isExpanded ? null : order.id)}
-              style={{ padding: "16px", cursor: "pointer" }}
+              style={{ cursor: "pointer" }}
             >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: "10px",
-                  marginBottom: "6px",
-                }}
-              >
-                <div className="stack" style={{ gap: "4px", maxWidth: "72%" }}>
-                  <strong style={{ lineHeight: "1.35" }}>{medicineSummary}</strong>
-                  <span className="muted">
-                    Placed: {formatDateTime(order.placedAt)}
-                  </span>
+              <div className="order-card-head">
+                <div className="order-card-main">
+                  <div className="order-card-label-row">
+                    <strong className="order-card-label">Ordered</strong>
+                    <span className={`status-pill status-${order.status}`}>{order.status}</span>
+                  </div>
+                  <span className="muted">Placed: {formatDateTime(order.placedAt)}</span>
                 </div>
-                <strong>{formatMoney(order.totalAmount)}</strong>
+                <strong className="order-card-total">{formatMoney(order.totalAmount)}</strong>
               </div>
 
-              <div
-                style={{
-                  display: "flex",
-                  gap: "8px",
-                  flexWrap: "wrap",
-                  marginTop: "8px",
-                }}
-              >
+              {!isExpanded ? (
+                <div className="order-preview-list">
+                  {order.items.map((item, index) => (
+                    <div
+                      key={`${order.id}-preview-${item.medicineId || item.medicineName || index}`}
+                      className="order-preview-card"
+                    >
+                      <div className="order-preview-media">
+                        {getOrderItemImage(item) ? (
+                          <img
+                            src={getOrderItemImage(item)}
+                            alt={item.medicineName || "Medicine"}
+                            className="order-preview-image"
+                          />
+                        ) : (
+                          <div className="order-preview-image order-preview-image-placeholder">No Image</div>
+                        )}
+                      </div>
+                      <div className="order-preview-copy">
+                        <span className="order-preview-name">{item.medicineName || "Medicine"}</span>
+                        <span className="order-preview-qty">Qty {item.quantity}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="order-card-actions">
+                {order.paymentStatus !== "paid" ? (
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={(event) => onCompletePayment(event, order)}
+                    style={{ padding: "8px 12px" }}
+                  >
+                    Complete Payment
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="btn-secondary"
@@ -351,20 +456,50 @@ const Orders = () => {
 
                   <section className="order-info-card order-items-card">
                     <h3 className="order-section-title">Medicine Details</h3>
-                    {order.items.map((item) => (
-                      <div
-                        key={`${order.id}-detail-${item.medicineId}`}
-                        className="order-item-row"
-                      >
-                        <div className="stack" style={{ gap: "2px" }}>
-                          <strong>{item.medicineName}</strong>
-                          <span className="muted">
-                            Qty: {item.quantity} x {formatMoney(item.unitPrice)}
-                          </span>
-                        </div>
-                        <strong>{formatMoney(item.lineTotal)}</strong>
-                      </div>
-                    ))}
+                    <div className="order-items-grid">
+                      {order.items.map((item, index) => (
+                        <article
+                          key={`${order.id}-detail-${item.medicineId || item.medicineName || index}`}
+                          className="order-item-detail-card"
+                        >
+                          <div className="order-item-detail-layout">
+                            <div className="order-item-detail-media">
+                              {getOrderItemImage(item) ? (
+                                <img
+                                  src={getOrderItemImage(item)}
+                                  alt={item.medicineName || "Medicine"}
+                                  className="order-item-detail-image"
+                                />
+                              ) : (
+                                <div className="order-item-detail-image order-item-detail-image-placeholder">
+                                  No Image
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="order-item-detail-content">
+                              <div className="order-item-detail-head">
+                                <strong>{item.medicineName || "Medicine"}</strong>
+                                <strong>{formatMoney(item.lineTotal)}</strong>
+                              </div>
+                              <div className="order-item-detail-meta">
+                                <span>
+                                  <strong>Quantity:</strong> {item.quantity}
+                                </span>
+                                <span>
+                                  <strong>Unit Price:</strong> {formatMoney(item.unitPrice)}
+                                </span>
+                                {item.category ? (
+                                  <span>
+                                    <strong>Category:</strong> {item.category}
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
                   </section>
                 </div>
               ) : null}

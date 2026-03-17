@@ -1,4 +1,4 @@
-import React, { useState, useContext } from 'react';
+import React, { useEffect, useState, useContext } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { AuthContext } from '../context/AuthContext';
 import { Eye, EyeOff } from 'lucide-react'; // Added professional icons
@@ -8,8 +8,12 @@ const Login = () => {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [showPassword, setShowPassword] = useState(false); // Visibility state
-    const { login } = useContext(AuthContext);
+    const { login, logout } = useContext(AuthContext);
     const navigate = useNavigate();
+
+    useEffect(() => {
+        logout();
+    }, [logout]);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -26,7 +30,7 @@ const Login = () => {
                 block: data?.user?.block,
                 roomNo: data?.user?.roomNo
             });
-            role === 'admin' ? navigate('/dashboard') : navigate('/');
+            ['admin', 'pharmacist'].includes(role) ? navigate('/dashboard') : navigate('/shop');
         } catch (err) {
             alert("Login Failed: " + (err.response?.data?.message || "Server Error"));
         }
@@ -36,7 +40,7 @@ const Login = () => {
         <div style={styles.container}>
             <div style={styles.card}>
                 <h2 style={styles.title}>
-                    Welcome to <span style={{color: '#24aeb1'}}>Medi</span><span style={{color: '#ef4281'}}>Sync</span>
+                    Welcome to <span style={{color: '#24aeb1'}}>Medi</span><span style={{color: '#111111'}}>Sync</span>
                 </h2>
                 <p style={styles.subtitle}>Login to access your healthcare dashboard</p>
                 

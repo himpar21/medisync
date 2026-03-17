@@ -1,18 +1,21 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
+import MedicineBrowseBar from "../components/common/MedicineBrowseBar";
 
 const OrderPlaced = () => {
   const location = useLocation();
   const order = location.state?.order;
+  const payment = location.state?.payment;
 
   return (
     <main className="page-wrap">
+      <MedicineBrowseBar />
       <section className="panel" style={{ padding: "28px", maxWidth: "760px", margin: "0 auto" }}>
         <h1 className="page-title" style={{ color: "var(--success)" }}>
           Order Placed Successfully
         </h1>
         <p className="page-subtitle" style={{ marginBottom: "14px" }}>
-          Your medicines order has been received and is being processed.
+          Your payment is complete and your medicines order has been confirmed.
         </p>
 
         {order ? (
@@ -30,6 +33,11 @@ const OrderPlaced = () => {
             <p style={{ margin: "0 0 8px" }}>
               <strong>Total:</strong> Rs {Number(order.totalAmount).toFixed(2)}
             </p>
+            {payment?.paymentNumber ? (
+              <p style={{ margin: "0 0 8px" }}>
+                <strong>Payment Ref:</strong> {payment.paymentNumber}
+              </p>
+            ) : null}
             <p style={{ margin: "0 0 8px" }}>
               <strong>Pickup:</strong>{" "}
               {new Date(order.pickupSlot?.date).toLocaleDateString()} | {order.pickupSlot?.label}
@@ -40,7 +48,7 @@ const OrderPlaced = () => {
           </div>
         ) : (
           <p className="muted" style={{ marginTop: 0 }}>
-            Order details are unavailable in this view. Open Order History to view full details.
+            Payment has been completed. Open Order History to view the full order details.
           </p>
         )}
 
@@ -48,7 +56,7 @@ const OrderPlaced = () => {
           <Link to="/orders" className="btn-primary">
             Go to Order History
           </Link>
-          <Link to="/" className="btn-secondary">
+          <Link to="/shop" className="btn-secondary">
             Continue Shopping
           </Link>
         </div>

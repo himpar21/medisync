@@ -1,15 +1,22 @@
 const express = require("express");
 const controller = require("../controllers/orderController");
 const { authenticate, authorize } = require("../middlewares/authMiddleware");
+const { verifyInternalRequest } = require("../middlewares/internalMiddleware");
 
 const router = express.Router();
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
 
-router.use(authenticate);
+router.patch(
+  "/internal/:orderId/payment-status",
+  verifyInternalRequest,
+  asyncHandler(controller.updatePaymentStatusInternal)
+);
 
 router.get("/medicines", asyncHandler(controller.listMedicines));
 router.get("/pickup-slots", asyncHandler(controller.getPickupSlots));
+
+router.use(authenticate);
 
 router.get("/cart", asyncHandler(controller.getCart));
 router.post("/cart/items", asyncHandler(controller.addToCart));

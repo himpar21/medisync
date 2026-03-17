@@ -12,7 +12,7 @@ const ProtectedRoute = ({ children, allowedRoles = [] }) => {
     }
 
     if (allowedRoles.length && !allowedRoles.includes(user.role)) {
-        return <Navigate to="/" />;
+        return <Navigate to="/shop" />;
     }
 
     return children;

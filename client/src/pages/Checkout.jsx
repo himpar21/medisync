@@ -3,6 +3,10 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { CartContext } from "../context/CartContext";
 import { checkoutCart, fetchPickupSlots } from "../services/orderService";
+import MedicineBrowseBar from "../components/common/MedicineBrowseBar";
+import CustomSelect from "../components/common/CustomSelect";
+
+const STRIPE_MIN_AMOUNT_INR = 50;
 
 const Checkout = () => {
   const { cart, refreshCart } = useContext(CartContext);
@@ -46,13 +50,29 @@ const Checkout = () => {
     () => slots.find((item) => item.id === slotId),
     [slots, slotId]
   );
+  const slotOptions = useMemo(
+    () =>
+      slots.map((slot) => ({
+        value: slot.id,
+        label: `${new Date(slot.date).toLocaleDateString()} | ${slot.label}`,
+      })),
+    [slots]
+  );
 
   const tax = Number((cart.subtotal * 0.05).toFixed(2));
   const total = Number((cart.subtotal + tax).toFixed(2));
+  const isBelowStripeMinimum = total < STRIPE_MIN_AMOUNT_INR;
 
   const handlePlaceOrder = async () => {
     if (!selectedSlot) {
       toast.error("Please select a pickup slot");
+      return;
+    }
+
+    if (isBelowStripeMinimum) {
+      toast.error(
+        `Stripe payments require at least Rs ${STRIPE_MIN_AMOUNT_INR.toFixed(2)}. Add more items before checkout.`,
+      );
       return;
     }
 
@@ -67,9 +87,14 @@ const Checkout = () => {
         note,
       });
       await refreshCart();
-      navigate("/order-placed", { state: { order } });
+      navigate(`/payments/${order.id}`, {
+        state: {
+          order,
+          fromCheckout: true,
+        },
+      });
     } catch (err) {
-      toast.error(err.response?.data?.message || "Unable to place order");
+      toast.error(err.response?.data?.message || "Unable to continue to payment");
     } finally {
       setPlacingOrder(false);
     }
@@ -77,13 +102,14 @@ const Checkout = () => {
 
   if (!cart.items.length) {
     return (
-      <main className="page-wrap">
+      <main className="page-wrap checkout-page">
+        <MedicineBrowseBar />
         <h1 className="page-title">Checkout</h1>
         <section className="panel" style={{ padding: "24px" }}>
           <p className="muted" style={{ marginTop: 0 }}>
             Your cart is empty. Add medicines before checkout.
           </p>
-          <Link to="/" className="btn-primary">
+          <Link to="/shop" className="btn-primary">
             Go to Shop
           </Link>
         </section>
@@ -92,79 +118,81 @@ const Checkout = () => {
   }
 
   return (
-    <main className="page-wrap">
+    <main className="page-wrap checkout-page">
+      <MedicineBrowseBar />
       <h1 className="page-title">Checkout</h1>
-      <p className="page-subtitle">Choose a pickup slot and place your order.</p>
+      <p className="page-subtitle">Choose a pickup slot and continue to payment.</p>
 
       <section className="checkout-layout">
-        <article className="panel" style={{ padding: "16px" }}>
-          <h3 style={{ marginTop: 0 }}>Address</h3>
-          <div className="panel" style={{ padding: "10px 12px", marginBottom: "14px" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: "10px",
-                flexWrap: "wrap",
-              }}
-            >
-              <strong>{selectedAddress || "Address not selected"}</strong>
-              <Link
-                to="/cart"
-                className="btn-secondary"
-                style={{ textDecoration: "none", padding: "8px 12px" }}
-              >
-                Change Address
-              </Link>
+        <article className="panel checkout-main-panel">
+          <section className="checkout-block">
+            <h3 className="checkout-block-title">Address</h3>
+            <div className="checkout-address-card">
+              <div className="checkout-address-row">
+                <strong>{selectedAddress || "Address not selected"}</strong>
+                <Link to="/cart" className="btn-secondary checkout-address-link">
+                  Change Address
+                </Link>
+              </div>
             </div>
-          </div>
+          </section>
 
-          <h3 style={{ marginTop: 0 }}>Pickup Slot</h3>
-          <select
-            className="select"
-            value={slotId}
-            onChange={(event) => setSlotId(event.target.value)}
-            style={{ width: "100%" }}
-          >
-            {slots.map((slot) => {
-              const dateLabel = new Date(slot.date).toLocaleDateString();
-              return (
-                <option key={slot.id} value={slot.id}>
-                  {dateLabel} | {slot.label}
-                </option>
-              );
-            })}
-          </select>
+          <section className="checkout-block">
+            <h3 className="checkout-block-title">Pickup Slot</h3>
+            <CustomSelect
+              value={slotId}
+              options={slotOptions}
+              onChange={setSlotId}
+              style={{ width: "100%" }}
+            />
+          </section>
 
-          <h3 style={{ marginBottom: "8px" }}>Order Note</h3>
-          <textarea
-            className="textarea"
-            rows={4}
-            style={{ width: "100%" }}
-            placeholder="Optional instructions for pharmacy staff"
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-          />
+          <section className="checkout-block">
+            <h3 className="checkout-block-title">Order Note</h3>
+            <textarea
+              className="textarea checkout-note"
+              rows={5}
+              placeholder="Optional instructions for pharmacy staff"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+            />
+          </section>
         </article>
 
-        <aside className="panel" style={{ padding: "16px" }}>
-          <h3 style={{ marginTop: 0 }}>Order Summary</h3>
-          <div className="stack">
+        <aside className="panel checkout-summary-panel">
+          <h3 className="checkout-block-title">Order Summary</h3>
+          <div className="checkout-summary-stack">
             <span className="muted">Items: {cart.totalItems}</span>
-            <span>Subtotal: Rs {Number(cart.subtotal).toFixed(2)}</span>
-            <span>Tax (5%): Rs {tax.toFixed(2)}</span>
-            <strong style={{ fontSize: "1.15rem" }}>Total: Rs {total.toFixed(2)}</strong>
+            <div className="checkout-summary-list">
+              <div className="checkout-summary-row">
+                <span>Subtotal</span>
+                <strong>Rs {Number(cart.subtotal).toFixed(2)}</strong>
+              </div>
+              <div className="checkout-summary-row">
+                <span>Tax (5%)</span>
+                <strong>Rs {tax.toFixed(2)}</strong>
+              </div>
+              <div className="checkout-summary-row checkout-summary-total">
+                <span>Total</span>
+                <strong>Rs {total.toFixed(2)}</strong>
+              </div>
+            </div>
+
+            {isBelowStripeMinimum ? (
+              <p className="error-text" style={{ margin: 0 }}>
+                Stripe payments require a minimum total of Rs {STRIPE_MIN_AMOUNT_INR.toFixed(2)}.
+              </p>
+            ) : null}
+
+            <button
+              type="button"
+              className="btn-primary checkout-place-order-btn"
+              disabled={placingOrder || !selectedAddress || isBelowStripeMinimum}
+              onClick={handlePlaceOrder}
+            >
+              {placingOrder ? "Preparing Payment..." : "Continue to Payment"}
+            </button>
           </div>
-          <button
-            type="button"
-            className="btn-primary"
-            style={{ width: "100%", marginTop: "16px" }}
-            disabled={placingOrder || !selectedAddress}
-            onClick={handlePlaceOrder}
-          >
-            {placingOrder ? "Placing Order..." : "Place Order"}
-          </button>
         </aside>
       </section>
     </main>

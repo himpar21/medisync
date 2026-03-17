@@ -1,18 +1,27 @@
-import React, { useState } from 'react';
+import React, { useContext, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { Eye, EyeOff } from 'lucide-react'; // Added professional icons
-import { registerUser } from '../services/authService';
+import { AuthContext } from '../context/AuthContext';
+import { loginUser, registerUser } from '../services/authService';
+import CustomSelect from '../components/common/CustomSelect';
 
 const MALE_BLOCKS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T'];
 const FEMALE_BLOCKS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'RJT'];
+const PASSWORD_HINT = 'Use at least 8 characters with letters and numbers.';
+
+const isStrongPassword = (password) => {
+    const value = String(password || '');
+    return value.length >= 8 && /[A-Za-z]/.test(value) && /\d/.test(value);
+};
 
 const Register = () => {
     const [formData, setFormData] = useState({ 
         name: '', 
         email: '', 
         password: '', 
-        role: 'patient',
+        confirmPassword: '',
+        role: 'student',
         gender: 'male',
         block: MALE_BLOCKS[0],
         roomNo: ''
@@ -20,9 +29,14 @@ const Register = () => {
     
     // State to toggle password visibility
     const [showPassword, setShowPassword] = useState(false);
+    const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+    const { login } = useContext(AuthContext);
     const navigate = useNavigate();
-    const isPatient = formData.role === 'patient';
+    const isStudent = formData.role === 'student';
     const allowedBlocks = formData.gender === 'female' ? FEMALE_BLOCKS : MALE_BLOCKS;
+    const passwordIsStrong = isStrongPassword(formData.password);
+    const passwordsMatch =
+        !formData.confirmPassword || formData.password === formData.confirmPassword;
 
     const handleGenderChange = (nextGender) => {
         const nextAllowedBlocks = nextGender === 'female' ? FEMALE_BLOCKS : MALE_BLOCKS;
@@ -35,7 +49,7 @@ const Register = () => {
 
     const handleRoleChange = (nextRole) => {
         setFormData((prev) => {
-            if (nextRole === 'admin') {
+            if (nextRole !== 'student') {
                 return {
                     ...prev,
                     role: nextRole,
@@ -56,12 +70,22 @@ const Register = () => {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
+
+        if (!passwordIsStrong) {
+            toast.error(PASSWORD_HINT);
+            return;
+        }
+
+        if (formData.password !== formData.confirmPassword) {
+            toast.error('Passwords do not match');
+            return;
+        }
         
         // 1. Trigger the loading toast
         const loadingToast = toast.loading('Creating your account...');
 
         try {
-            const payload = isPatient
+            const payload = isStudent
                 ? formData
                 : {
                     name: formData.name,
@@ -70,16 +94,32 @@ const Register = () => {
                     role: formData.role
                 };
 
+            const { confirmPassword, ...registerPayload } = payload;
+
             // 2. Call the Gateway (Port 5000)
-            await registerUser(payload);
+            await registerUser(registerPayload);
+
+            const loginResponse = await loginUser({
+                email: formData.email,
+                password: formData.password
+            });
+
+            const role = loginResponse?.user?.role || loginResponse?.role;
+            login({
+                token: loginResponse.token,
+                role,
+                userId: loginResponse?.user?.id,
+                name: loginResponse?.user?.name,
+                email: loginResponse?.user?.email,
+                gender: loginResponse?.user?.gender,
+                block: loginResponse?.user?.block,
+                roomNo: loginResponse?.user?.roomNo
+            });
             
             // 3. Update toast to Success
-            toast.success('Registration Successful! Welcome to MediSync.', { id: loadingToast });
-            
-            // 4. Wait 2 seconds so the user can see the message, then redirect
-            setTimeout(() => {
-                navigate('/login');
-            }, 2000);
+            toast.success('Registration successful. You are now logged in.', { id: loadingToast });
+
+            navigate(['admin', 'pharmacist'].includes(role) ? '/dashboard' : '/shop');
             
         } catch (err) {
             // 5. Update toast to Error with specific message from backend/gateway
@@ -93,7 +133,7 @@ const Register = () => {
             <div style={styles.card}>
                 <div style={styles.brandSection}>
                     <h2 style={styles.logo}>
-                        <span style={{color: '#24aeb1'}}>Medi</span><span style={{color: '#ef4281'}}>Sync</span>
+                        <span style={{color: '#24aeb1'}}>Medi</span><span style={{color: '#111111'}}>Sync</span>
                     </h2>
                     <p style={styles.subtitle}>Join our healthcare network</p>
                 </div>
@@ -106,22 +146,22 @@ const Register = () => {
                             <label style={styles.radioLabel}>
                                 <input 
                                     type="radio" 
-                                    value="patient" 
-                                    checked={formData.role === 'patient'}
+                                    value="student" 
+                                    checked={formData.role === 'student'}
                                     onChange={(e) => handleRoleChange(e.target.value)}
                                     style={styles.radioInput}
                                 />
-                                Patient
+                                Student
                             </label>
                             <label style={styles.radioLabel}>
                                 <input 
                                     type="radio" 
-                                    value="admin" 
-                                    checked={formData.role === 'admin'}
+                                    value="pharmacist" 
+                                    checked={formData.role === 'pharmacist'}
                                     onChange={(e) => handleRoleChange(e.target.value)}
                                     style={styles.radioInput}
                                 />
-                                Pharmacist / Admin
+                                Pharmacist
                             </label>
                         </div>
                     </div>
@@ -148,7 +188,7 @@ const Register = () => {
                         />
                     </div>
 
-                    {isPatient && (
+                    {isStudent && (
                         <>
                             <div style={styles.radioSection}>
                                 <label style={styles.label}>Gender:</label>
@@ -178,18 +218,13 @@ const Register = () => {
 
                             <div style={styles.inputGroup}>
                                 <label style={styles.label}>Block</label>
-                                <select
-                                    style={styles.input}
+                                <CustomSelect
+                                    id="register-block-select"
+                                    className="register-block-select"
                                     value={formData.block}
-                                    onChange={(e) => setFormData({ ...formData, block: e.target.value })}
-                                    required={isPatient}
-                                >
-                                    {allowedBlocks.map((blockOption) => (
-                                        <option key={blockOption} value={blockOption}>
-                                            {blockOption}
-                                        </option>
-                                    ))}
-                                </select>
+                                    options={allowedBlocks}
+                                    onChange={(nextValue) => setFormData({ ...formData, block: String(nextValue || '') })}
+                                />
                             </div>
 
                             <div style={styles.inputGroup}>
@@ -200,7 +235,7 @@ const Register = () => {
                                     style={styles.input}
                                     value={formData.roomNo}
                                     onChange={(e) => setFormData({ ...formData, roomNo: e.target.value })}
-                                    required={isPatient}
+                                    required={isStudent}
                                 />
                             </div>
                         </>
@@ -213,6 +248,7 @@ const Register = () => {
                                 type={showPassword ? "text" : "password"} 
                                 placeholder="Create password" 
                                 style={{ ...styles.input, width: '100%', paddingRight: '45px' }} 
+                                value={formData.password}
                                 onChange={(e) => setFormData({...formData, password: e.target.value})} 
                                 required 
                             />
@@ -225,9 +261,48 @@ const Register = () => {
                                 {showPassword ? <EyeOff size={18} color="#9ca3af" /> : <Eye size={18} color="#9ca3af" />}
                             </button>
                         </div>
+                        <span style={passwordIsStrong ? styles.helperSuccess : styles.helperText}>
+                            {PASSWORD_HINT}
+                        </span>
                     </div>
 
-                    <button type="submit" style={styles.button}>Create Account</button>
+                    <div style={styles.inputGroup}>
+                        <label style={styles.label}>Re-enter Password</label>
+                        <div style={{ position: 'relative' }}>
+                            <input 
+                                type={showConfirmPassword ? "text" : "password"} 
+                                placeholder="Re-enter password" 
+                                style={{ ...styles.input, width: '100%', paddingRight: '45px' }} 
+                                value={formData.confirmPassword}
+                                onChange={(e) => setFormData({...formData, confirmPassword: e.target.value})} 
+                                required 
+                            />
+                            <button 
+                                type="button"
+                                onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                                style={styles.eyeButton}
+                            >
+                                {showConfirmPassword ? <EyeOff size={18} color="#9ca3af" /> : <Eye size={18} color="#9ca3af" />}
+                            </button>
+                        </div>
+                        {formData.confirmPassword ? (
+                            <span style={passwordsMatch ? styles.helperSuccess : styles.helperError}>
+                                {passwordsMatch ? 'Passwords match' : 'Passwords do not match'}
+                            </span>
+                        ) : null}
+                    </div>
+
+                    <button
+                        type="submit"
+                        style={{
+                            ...styles.button,
+                            opacity: !passwordIsStrong || !passwordsMatch ? 0.65 : 1,
+                            cursor: !passwordIsStrong || !passwordsMatch ? 'not-allowed' : 'pointer'
+                        }}
+                        disabled={!passwordIsStrong || !passwordsMatch}
+                    >
+                        Create Account
+                    </button>
                 </form>
 
                 <p style={styles.footerText}>
@@ -270,6 +345,25 @@ const styles = {
         fontSize: '14px',
         boxSizing: 'border-box'
     },
+    selectInput: {
+        padding: '10px 12px',
+        minHeight: '40px',
+        borderRadius: '8px',
+        border: '1px solid #ddd',
+        outline: 'none',
+        fontSize: '14px',
+        boxSizing: 'border-box',
+        appearance: 'none',
+        WebkitAppearance: 'none',
+        MozAppearance: 'none',
+        cursor: 'pointer',
+        paddingRight: '36px',
+        backgroundImage:
+            'linear-gradient(45deg, transparent 50%, #4d6b8b 50%), linear-gradient(135deg, #4d6b8b 50%, transparent 50%), linear-gradient(180deg, #ffffff 0%, #f5fbfb 100%)',
+        backgroundPosition: 'calc(100% - 17px) calc(50% - 3px), calc(100% - 11px) calc(50% - 3px), 0 0',
+        backgroundSize: '6px 6px, 6px 6px, 100% 100%',
+        backgroundRepeat: 'no-repeat'
+    },
     radioSection: { marginTop: '2px' },
     radioGroup: { display: 'flex', gap: '16px', marginTop: '4px', flexWrap: 'wrap' },
     radioLabel: { fontSize: '14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', color: '#555' },
@@ -287,7 +381,21 @@ const styles = {
         alignItems: 'center',
         zIndex: 10
     },
-    button: { padding: '12px', backgroundColor: '#24aeb1', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer', fontSize: '16px', transition: 'background 0.3s' },
+    helperText: { fontSize: '12px', color: '#667085', lineHeight: 1.4 },
+    helperSuccess: { fontSize: '12px', color: '#2e7d32', lineHeight: 1.4 },
+    helperError: { fontSize: '12px', color: '#c62828', lineHeight: 1.4 },
+    button: {
+        padding: '12px',
+        backgroundColor: '#24aeb1',
+        color: 'white',
+        border: 'none',
+        borderRadius: '8px',
+        fontWeight: 'bold',
+        cursor: 'pointer',
+        fontSize: '16px',
+        transition: 'background 0.3s',
+        opacity: 1
+    },
     footerText: { textAlign: 'center', marginTop: '12px', fontSize: '13px', color: '#666' },
     link: { color: '#ef4281', textDecoration: 'none', fontWeight: 'bold' }
 };

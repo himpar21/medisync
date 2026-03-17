@@ -1,6 +1,15 @@
-import React, { createContext, useState, useEffect } from 'react';
+import React, { createContext, useState, useEffect, useCallback } from 'react';
 
 export const AuthContext = createContext();
+
+const ROLE_ALIASES = {
+    patient: 'student'
+};
+
+const normalizeRole = (role) => {
+    const normalized = String(role || '').trim().toLowerCase();
+    return ROLE_ALIASES[normalized] || normalized;
+};
 
 export const AuthProvider = ({ children }) => {
     const [user, setUser] = useState(null);
@@ -17,14 +26,15 @@ export const AuthProvider = ({ children }) => {
         const roomNo = localStorage.getItem('roomNo');
 
         if (token && role) {
-            setUser({ token, role, userId, name, email, gender, block, roomNo });
+            setUser({ token, role: normalizeRole(role), userId, name, email, gender, block, roomNo });
         }
         setLoading(false);
     }, []);
 
-    const login = (userData) => {
+    const login = useCallback((userData) => {
+        const role = normalizeRole(userData.role);
         localStorage.setItem('token', userData.token);
-        localStorage.setItem('role', userData.role);
+        localStorage.setItem('role', role);
         if (userData.userId) {
             localStorage.setItem('userId', userData.userId);
         }
@@ -52,7 +62,7 @@ export const AuthProvider = ({ children }) => {
 
         setUser({
             token: userData.token,
-            role: userData.role,
+            role,
             userId: userData.userId,
             name: userData.name,
             email: userData.email,
@@ -60,9 +70,9 @@ export const AuthProvider = ({ children }) => {
             block: userData.block,
             roomNo: userData.roomNo
         });
-    };
+    }, []);
 
-    const logout = () => {
+    const logout = useCallback(() => {
         localStorage.removeItem('token');
         localStorage.removeItem('role');
         localStorage.removeItem('userId');
@@ -72,7 +82,7 @@ export const AuthProvider = ({ children }) => {
         localStorage.removeItem('block');
         localStorage.removeItem('roomNo');
         setUser(null);
-    };
+    }, []);
 
     return (
         <AuthContext.Provider value={{ user, login, logout, loading }}>

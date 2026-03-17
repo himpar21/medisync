@@ -26,6 +26,7 @@ function formatCart(cart) {
       medicineId: item.medicineId,
       medicineName: item.medicineName,
       category: item.category,
+      imageData: item.imageData || "",
       unitPrice: item.unitPrice,
       quantity: item.quantity,
       lineTotal: item.lineTotal,
@@ -35,6 +36,36 @@ function formatCart(cart) {
     currency: cart.currency,
     updatedAt: cart.updatedAt,
   };
+}
+
+async function hydrateCartImages(cart) {
+  if (!cart?.items?.length) {
+    return cart;
+  }
+
+  let updated = false;
+
+  for (const item of cart.items) {
+    if (String(item.imageData || "").trim()) {
+      continue;
+    }
+
+    const medicine = await inventoryClient.getMedicineById(item.medicineId);
+    if (!medicine) {
+      continue;
+    }
+
+    item.imageData = medicine.imageData || "";
+    if (item.imageData) {
+      updated = true;
+    }
+  }
+
+  if (updated) {
+    await cart.save();
+  }
+
+  return cart;
 }
 
 function formatOrder(order) {
@@ -59,6 +90,45 @@ function formatOrder(order) {
     placedAt: order.placedAt,
     updatedAt: order.updatedAt,
   };
+}
+
+async function hydrateOrderImages(order) {
+  if (!order?.items?.length) {
+    return order;
+  }
+
+  let updated = false;
+  const imageCache = new Map();
+
+  for (const item of order.items) {
+    if (String(item.imageData || "").trim()) {
+      continue;
+    }
+
+    const medicineId = String(item.medicineId || "").trim();
+    if (!medicineId) {
+      continue;
+    }
+
+    if (!imageCache.has(medicineId)) {
+      const medicine = await inventoryClient.getMedicineById(medicineId);
+      imageCache.set(medicineId, String(medicine?.imageData || "").trim());
+    }
+
+    const imageData = imageCache.get(medicineId) || "";
+    if (!imageData) {
+      continue;
+    }
+
+    item.imageData = imageData;
+    updated = true;
+  }
+
+  if (updated) {
+    await order.save();
+  }
+
+  return order;
 }
 
 function generateOrderNumber() {
@@ -141,10 +211,21 @@ exports.listMedicines = async (req, res) => {
     items: medicines.map((medicine) => ({
       id: medicine._id || medicine.id || medicine.medicineId,
       name: medicine.name,
+      description: medicine.description || "",
+      prescriptionRequired: Boolean(medicine.prescriptionRequired),
+      uses: medicine.uses || "",
+      dosage: medicine.dosage || "",
+      sideEffects: medicine.sideEffects || "",
+      warnings: medicine.warnings || "",
+      storageInstructions: medicine.storageInstructions || "",
       category: medicine.category || "General",
       price: toNumber(medicine.price),
-      stock: toNumber(medicine.stock),
+      stock: toNumber(medicine.availableStock, toNumber(medicine.stock)),
+      availableStock: toNumber(medicine.availableStock, toNumber(medicine.stock)),
       manufacturer: medicine.manufacturer || "Unknown",
+      imageData: medicine.imageData || "",
+      expiryDate: medicine.expiryDate || null,
+      batchNo: medicine.batchNo || "",
     })),
   });
 };
@@ -157,6 +238,7 @@ exports.getPickupSlots = async (req, res) => {
 exports.getCart = async (req, res) => {
   const cart = await getOrCreateCart(req.user.userId);
   cart.recalculate();
+  await hydrateCartImages(cart);
   await cart.save();
   res.status(200).json({ cart: formatCart(cart) });
 };
@@ -180,7 +262,7 @@ exports.addToCart = async (req, res) => {
     return res.status(404).json({ message: "Medicine not found" });
   }
 
-  if (requestedQty > toNumber(medicine.stock, 0)) {
+  if (requestedQty > toNumber(medicine.availableStock, toNumber(medicine.stock, 0))) {
     return res.status(409).json({ message: "Requested quantity exceeds stock" });
   }
 
@@ -188,17 +270,20 @@ exports.addToCart = async (req, res) => {
     const current = editableCart.items.find((item) => item.medicineId === medicineId);
     if (current) {
       current.quantity = Math.min(current.quantity + requestedQty, MAX_ITEM_QUANTITY);
+      current.imageData = current.imageData || medicine.imageData || "";
     } else {
       editableCart.items.push({
         medicineId,
         medicineName: medicine.name,
         category: medicine.category || "General",
+        imageData: medicine.imageData || "",
         unitPrice: toNumber(medicine.price, 0),
         quantity: requestedQty,
       });
     }
   });
 
+  await hydrateCartImages(cart);
   return res.status(200).json({ cart: formatCart(cart) });
 };
 
@@ -238,6 +323,7 @@ exports.updateCartItem = async (req, res) => {
     return res.status(404).json({ message: "Cart item not found" });
   }
 
+  await hydrateCartImages(cart);
   return res.status(200).json({ cart: formatCart(cart) });
 };
 
@@ -248,6 +334,7 @@ exports.removeFromCart = async (req, res) => {
     editableCart.items = editableCart.items.filter((item) => item.medicineId !== medicineId);
   });
 
+  await hydrateCartImages(cart);
   return res.status(200).json({ cart: formatCart(cart) });
 };
 
@@ -353,6 +440,7 @@ exports.checkout = async (req, res) => {
         medicineId: item.medicineId,
         medicineName: item.medicineName,
         category: item.category,
+        imageData: item.imageData || "",
         unitPrice: item.unitPrice,
         quantity: item.quantity,
         lineTotal: item.lineTotal,
@@ -368,16 +456,16 @@ exports.checkout = async (req, res) => {
         label: requestedSlot.label,
       },
       address: selectedAddress,
-      status: "placed",
+      status: "payment_pending",
       paymentStatus: "pending",
       inventoryStatus: "reserved",
       idempotencyKey: idempotencyKey || undefined,
       note,
       statusHistory: [
         {
-          status: "placed",
+          status: "payment_pending",
           updatedBy: userId,
-          note: "Order placed successfully",
+          note: "Order created and waiting for payment",
         },
       ],
       placedAt: new Date(),
@@ -413,6 +501,7 @@ exports.getOrderHistory = async (req, res) => {
   const filter = isPrivileged ? {} : { userId: req.user.userId };
 
   const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(100);
+  await Promise.all(orders.map((order) => hydrateOrderImages(order)));
 
   res.status(200).json({
     items: orders.map(formatOrder),
@@ -430,6 +519,7 @@ exports.getOrderById = async (req, res) => {
     return res.status(404).json({ message: "Order not found" });
   }
 
+  await hydrateOrderImages(order);
   return res.status(200).json({ order: formatOrder(order) });
 };
 
@@ -470,6 +560,56 @@ exports.updateOrderStatus = async (req, res) => {
 
   return res.status(200).json({
     message: "Order status updated",
+    order: formatOrder(order),
+  });
+};
+
+exports.updatePaymentStatusInternal = async (req, res) => {
+  const paymentStatus = String(req.body.paymentStatus || "").trim().toLowerCase();
+  const requestedOrderStatus = String(req.body.status || "").trim();
+
+  if (!["pending", "paid", "failed", "refunded"].includes(paymentStatus)) {
+    return res.status(400).json({
+      message: "Invalid paymentStatus. Allowed: pending, paid, failed, refunded",
+    });
+  }
+
+  const order = await Order.findById(req.params.orderId);
+  if (!order) {
+    return res.status(404).json({ message: "Order not found" });
+  }
+
+  const previousStatus = order.status;
+  order.paymentStatus = paymentStatus;
+
+  if (requestedOrderStatus && ORDER_STATUS.includes(requestedOrderStatus)) {
+    order.status = requestedOrderStatus;
+  } else if (
+    paymentStatus === "paid" &&
+    ["placed", "payment_pending"].includes(order.status)
+  ) {
+    order.status = "confirmed";
+  } else if (
+    paymentStatus === "failed" &&
+    ["placed", "payment_pending"].includes(order.status)
+  ) {
+    order.status = "payment_pending";
+  }
+
+  order.statusHistory.push({
+    status: order.status,
+    updatedBy: "payment-service",
+    note: `Payment status updated to ${paymentStatus}`,
+  });
+
+  await order.save();
+
+  if (order.status !== previousStatus) {
+    await eventPublisher.publishOrderStatusUpdated(order, previousStatus);
+  }
+
+  return res.status(200).json({
+    message: "Payment status synced successfully",
     order: formatOrder(order),
   });
 };

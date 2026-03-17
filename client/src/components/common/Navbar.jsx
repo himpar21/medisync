@@ -1,5 +1,5 @@
 import React, { useContext, useEffect, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { ChevronDown, User } from 'lucide-react';
 import { AuthContext } from '../../context/AuthContext';
 import { CartContext } from '../../context/CartContext';
@@ -7,9 +7,12 @@ import { CartContext } from '../../context/CartContext';
 const Navbar = () => {
     const { user, logout } = useContext(AuthContext);
     const { cart } = useContext(CartContext);
+    const isPharmacist = user?.role === 'pharmacist';
     const navigate = useNavigate();
+    const location = useLocation();
     const [menuOpen, setMenuOpen] = useState(false);
     const profileMenuRef = useRef(null);
+    const hideTopNavbar = ['admin', 'pharmacist'].includes(user?.role) && location.pathname === '/dashboard';
 
     const handleLogout = () => {
         setMenuOpen(false);
@@ -31,20 +34,33 @@ const Navbar = () => {
         };
     }, []);
 
+    if (hideTopNavbar) {
+        return null;
+    }
+
     return (
         <nav className="app-nav">
-            <Link to="/" className="logo-link">
+            <Link to={isPharmacist ? "/dashboard" : "/shop"} className="logo-link">
                 Medi<span>Sync</span>
             </Link>
             <div className="nav-links">
-                <Link to="/" className="nav-link">Shop</Link>
-                {user && (
+                {!isPharmacist && <Link to="/shop" className="nav-link">Shop</Link>}
+                {user && !isPharmacist && (
                     <Link to="/cart" className="nav-link nav-cart-link">
                         Cart
                         <span className="cart-badge">{cart?.totalItems || 0}</span>
                     </Link>
                 )}
                 {user ? (
+                    isPharmacist ? (
+                        <>
+                            <Link to="/dashboard" className="nav-link">Dashboard</Link>
+                            <Link to="/profile" className="nav-link">Profile</Link>
+                            <button type="button" className="btn-secondary" onClick={handleLogout}>
+                                Logout
+                            </button>
+                        </>
+                    ) : (
                     <div className="profile-menu-wrap" ref={profileMenuRef}>
                         <button
                             type="button"
@@ -78,7 +94,7 @@ const Navbar = () => {
                                 >
                                     Order History
                                 </Link>
-                                {user.role === 'admin' && (
+                                {['admin', 'pharmacist'].includes(user.role) && (
                                     <Link
                                         to="/dashboard"
                                         className="profile-dropdown-item"
@@ -97,6 +113,7 @@ const Navbar = () => {
                             </div>
                         ) : null}
                     </div>
+                    )
                 ) : (
                     <Link to="/login" className="btn-primary">Login</Link>
                 )}
