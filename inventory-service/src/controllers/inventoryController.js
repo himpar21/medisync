@@ -1,6 +1,7 @@
 const Medicine = require("../models/Medicine");
 const cache = require("../config/redis");
 const stockService = require("../services/stockService");
+const eventPublisher = require("../services/eventPublisher");
 const {
   formatBatch,
   getMedicineBatches,
@@ -323,6 +324,7 @@ exports.createMedicine = async (req, res) => {
 
     await existingMedicine.save();
     await clearInventoryCaches();
+    await eventPublisher.publishMedicineUpdated(existingMedicine);
 
     return res.status(201).json({
       message: "Medicine batch added successfully",
@@ -349,6 +351,7 @@ exports.createMedicine = async (req, res) => {
   syncMedicineInventoryFields(medicine);
   await medicine.save();
   await clearInventoryCaches();
+  await eventPublisher.publishMedicineCreated(medicine);
 
   return res.status(201).json({
     message: "Medicine created successfully",
@@ -490,6 +493,7 @@ exports.updateMedicine = async (req, res) => {
   await existingMedicine.save();
 
   await clearInventoryCaches();
+  await eventPublisher.publishMedicineUpdated(existingMedicine);
   return res.status(200).json({
     message: "Medicine updated successfully",
     medicine: formatMedicine(existingMedicine.toJSON()),
@@ -508,6 +512,7 @@ exports.deleteMedicine = async (req, res) => {
   }
 
   await clearInventoryCaches();
+  await eventPublisher.publishMedicineDeleted(medicineId);
   return res.status(200).json({
     message: "Medicine deleted successfully",
   });
@@ -574,6 +579,7 @@ exports.adjustStock = async (req, res) => {
   syncMedicineInventoryFields(medicine);
   await medicine.save();
   await clearInventoryCaches();
+  await eventPublisher.publishMedicineUpdated(medicine);
 
   return res.status(200).json({
     message: "Stock updated successfully",

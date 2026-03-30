@@ -89,11 +89,26 @@ const paymentSchema = new mongoose.Schema(
       default: [],
     },
   },
-  { timestamps: true }
+  { timestamps: true, optimisticConcurrency: true }
 );
 
 paymentSchema.index({ orderId: 1, userId: 1, createdAt: -1 });
-paymentSchema.index({ stripePaymentIntentId: 1 }, { sparse: true });
+paymentSchema.index(
+  { orderId: 1, userId: 1, status: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { status: "pending" },
+  }
+);
+paymentSchema.index(
+  { stripePaymentIntentId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      stripePaymentIntentId: { $exists: true, $type: "string", $ne: "" },
+    },
+  }
+);
 
 paymentSchema.set("toJSON", {
   transform: (doc, ret) => {

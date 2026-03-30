@@ -1,7 +1,15 @@
 const mongoose = require("mongoose");
+const { createHash } = require("node:crypto");
 const Payment = require("../models/Payment");
+const EventInbox = require("../models/EventInbox");
 const publisher = require("../events/publisher");
 const { getPublishableKey, getStripeClient } = require("../config/stripe");
+const cache = require("../services/paymentCache");
+
+const CACHE_PAYMENT_BY_ID_PREFIX = "payments:id:";
+const CACHE_PAYMENT_BY_ORDER_PREFIX = "payments:order:";
+const CACHE_PAYMENT_LIST_PREFIX = "payments:list:";
+const CACHE_STRIPE_CONFIG_KEY = "payments:stripe:config";
 
 function toNumber(value, fallback = 0) {
   const parsed = Number(value);
@@ -103,6 +111,56 @@ function formatPayment(payment) {
     createdAt: payment.createdAt,
     updatedAt: payment.updatedAt,
   };
+}
+
+function buildPaymentIdCacheKey(paymentId) {
+  return `${CACHE_PAYMENT_BY_ID_PREFIX}${String(paymentId || "").trim()}`;
+}
+
+function buildOrderCacheKey(orderId) {
+  return `${CACHE_PAYMENT_BY_ORDER_PREFIX}${String(orderId || "").trim()}`;
+}
+
+function buildListCacheKey(status) {
+  return `${CACHE_PAYMENT_LIST_PREFIX}${String(status || "all").trim().toLowerCase()}`;
+}
+
+async function invalidatePaymentCache({ paymentId = "", orderId = "" } = {}) {
+  if (paymentId) {
+    await cache.delKey(buildPaymentIdCacheKey(paymentId));
+  }
+
+  if (orderId) {
+    await cache.delKey(buildOrderCacheKey(orderId));
+  }
+
+  await cache.delByPrefix(CACHE_PAYMENT_LIST_PREFIX);
+}
+
+async function savePaymentSafely(payment) {
+  try {
+    await payment.save();
+  } catch (error) {
+    if (error.name === "VersionError") {
+      const conflict = new Error("Payment update conflict detected. Please retry.");
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    throw error;
+  }
+}
+
+function deriveEventId(eventType, payload, providedEventId, source = "unknown") {
+  const direct = String(providedEventId || "").trim();
+  if (direct) {
+    return direct;
+  }
+
+  const rawSeed = `${source}|${eventType}|${String(payload?.orderId || "").trim()}|${String(
+    payload?.currentStatus || payload?.status || ""
+  ).trim()}|${String(payload?.paymentStatus || "").trim()}|${String(payload?.paymentId || "").trim()}`;
+
+  return createHash("sha1").update(rawSeed).digest("hex");
 }
 
 function ensureOwnerOrPrivileged(req, payment) {
@@ -218,7 +276,11 @@ async function closeStalePendingPayments({ stripe, orderId, userId, keepPaymentI
         status: "failed",
         message: "Superseded by the latest payment attempt",
       });
-      await payment.save();
+      await savePaymentSafely(payment);
+      await invalidatePaymentCache({
+        paymentId: String(payment._id),
+        orderId: payment.orderId,
+      });
     })
   );
 }
@@ -294,12 +356,19 @@ async function publishStatusTransition(payment, previousStatus) {
 }
 
 exports.getStripeConfig = async (req, res) => {
+  const cached = await cache.getJSON(CACHE_STRIPE_CONFIG_KEY);
+  if (cached) {
+    return res.status(200).json(cached);
+  }
+
   const publishableKey = getPublishableKey();
   if (!publishableKey) {
     return res.status(500).json({ message: "Stripe publishable key is not configured" });
   }
 
-  return res.status(200).json({ publishableKey });
+  const payload = { publishableKey };
+  await cache.setJSON(CACHE_STRIPE_CONFIG_KEY, payload, 120);
+  return res.status(200).json(payload);
 };
 
 exports.createPayment = async (req, res) => {
@@ -401,10 +470,15 @@ exports.createPayment = async (req, res) => {
         status: payment.status,
         message: intentInfo.message,
       });
-      await payment.save();
+      await savePaymentSafely(payment);
     } else if (payment.isModified()) {
-      await payment.save();
+      await savePaymentSafely(payment);
     }
+
+    await invalidatePaymentCache({
+      paymentId: String(payment._id),
+      orderId: payment.orderId,
+    });
 
     if (payment.status === "succeeded") {
       await closeStalePendingPayments({
@@ -496,7 +570,11 @@ exports.createPayment = async (req, res) => {
     status: "pending",
     message: "Stripe PaymentIntent created",
   });
-  await payment.save();
+  await savePaymentSafely(payment);
+  await invalidatePaymentCache({
+    paymentId: String(payment._id),
+    orderId: payment.orderId,
+  });
 
   await closeStalePendingPayments({
     stripe,
@@ -556,7 +634,11 @@ exports.syncStripePayment = async (req, res) => {
     status: payment.status,
     message: intentInfo.message,
   });
-  await payment.save();
+  await savePaymentSafely(payment);
+  await invalidatePaymentCache({
+    paymentId: String(payment._id),
+    orderId: payment.orderId,
+  });
 
   await publishStatusTransition(payment, previousStatus);
 
@@ -576,16 +658,28 @@ exports.getPaymentById = async (req, res) => {
     return res.status(400).json({ message: "Invalid paymentId" });
   }
 
-  const payment = await Payment.findById(paymentId);
+  const cacheKey = buildPaymentIdCacheKey(paymentId);
+  const cached = await cache.getJSON(cacheKey);
+  if (cached) {
+    if (!ensureOwnerOrPrivileged(req, cached)) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    return res.status(200).json({ payment: cached });
+  }
+
+  const payment = await Payment.findById(paymentId).lean();
   if (!payment) {
     return res.status(404).json({ message: "Payment not found" });
   }
 
-  if (!ensureOwnerOrPrivileged(req, payment)) {
+  const formatted = formatPayment(payment);
+  await cache.setJSON(cacheKey, formatted, 45);
+
+  if (!ensureOwnerOrPrivileged(req, formatted)) {
     return res.status(403).json({ message: "Forbidden" });
   }
 
-  return res.status(200).json({ payment: formatPayment(payment) });
+  return res.status(200).json({ payment: formatted });
 };
 
 exports.getPaymentByOrderId = async (req, res) => {
@@ -594,7 +688,15 @@ exports.getPaymentByOrderId = async (req, res) => {
     return res.status(400).json({ message: "orderId is required" });
   }
 
-  const payments = await Payment.find({ orderId }).sort({ createdAt: -1 }).limit(20);
+  const cacheKey = buildOrderCacheKey(orderId);
+  let payments = await cache.getJSON(cacheKey);
+
+  if (!payments) {
+    const dbPayments = await Payment.find({ orderId }).sort({ createdAt: -1 }).limit(20).lean();
+    payments = dbPayments.map(formatPayment);
+    await cache.setJSON(cacheKey, payments, 30);
+  }
+
   let pendingIncluded = false;
   const visiblePayments = payments.filter((payment) => {
     if (!ensureOwnerOrPrivileged(req, payment)) {
@@ -614,7 +716,7 @@ exports.getPaymentByOrderId = async (req, res) => {
   });
 
   return res.status(200).json({
-    items: visiblePayments.map(formatPayment),
+    items: visiblePayments,
   });
 };
 
@@ -626,9 +728,17 @@ exports.listPayments = async (req, res) => {
     query.status = status;
   }
 
-  const items = await Payment.find(query).sort({ createdAt: -1 }).limit(200);
+  const cacheKey = buildListCacheKey(status);
+  let items = await cache.getJSON(cacheKey);
+
+  if (!items) {
+    const dbItems = await Payment.find(query).sort({ createdAt: -1 }).limit(200).lean();
+    items = dbItems.map(formatPayment);
+    await cache.setJSON(cacheKey, items, 20);
+  }
+
   return res.status(200).json({
-    items: items.map(formatPayment),
+    items,
   });
 };
 
@@ -641,76 +751,132 @@ exports.handleOrderEvents = async (req, res) => {
 
   const eventType = String(req.body.eventType || "").trim();
   const payload = req.body.payload || {};
+  const source = String(req.body.source || req.headers["x-event-source"] || "unknown").trim();
+  const eventId = deriveEventId(eventType, payload, req.body.eventId || req.headers["x-event-id"], source);
 
   if (!eventType) {
     return res.status(400).json({ message: "eventType is required" });
   }
 
-  if (eventType === "order.created") {
-    const orderId = String(payload.orderId || "").trim();
-    if (!orderId) {
-      return res.status(400).json({ message: "payload.orderId is required for order.created" });
-    }
-
-    const exists = await Payment.findOne({
-      orderId,
-      userId: String(payload.userId || ""),
-      status: "pending",
+  let inboxCreated = false;
+  try {
+    await EventInbox.create({
+      eventId,
+      source,
+      eventType,
+      receivedAt: new Date(),
     });
-
-    if (!exists) {
-      await Payment.create({
-        paymentNumber: randomPaymentNumber(),
-        orderId,
-        orderNumber: payload.orderNumber || "",
-        userId: String(payload.userId || "unknown"),
-        amount: toNumber(payload.totalAmount, 0),
-        currency: "INR",
-        method: "stripe",
-        status: "pending",
-        gatewayStatus: "awaiting_intent",
-        message: "Awaiting Stripe payment initialization",
-        metadata: {
-          source: "order.event",
-        },
-        history: [
-          {
-            status: "pending",
-            message: "Order created event received",
-          },
-        ],
-      });
+    inboxCreated = true;
+  } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(200).json({ ok: true, duplicate: true });
     }
+    throw error;
   }
 
-  if (eventType === "order.status_updated") {
-    const orderId = String(payload.orderId || "").trim();
-    if (orderId && ["cancelled", "failed"].includes(String(payload.currentStatus || "").trim())) {
-      const failureMessage =
-        String(payload.currentStatus || "").trim() === "failed"
-          ? "Order failed before payment completion"
-          : "Order cancelled before payment";
-      await Payment.updateMany(
-        {
-          orderId,
-          status: "pending",
-        },
-        {
-          $set: {
-            status: "failed",
-            gatewayStatus: "cancelled",
-            message: failureMessage,
+  try {
+    if (eventType === "order.created") {
+      const orderId = String(payload.orderId || "").trim();
+      if (!orderId) {
+        return res.status(400).json({ message: "payload.orderId is required for order.created" });
+      }
+
+      try {
+        const createdPayment = await Payment.findOneAndUpdate(
+          {
+            orderId,
+            userId: String(payload.userId || ""),
+            status: "pending",
           },
-          $push: {
-            history: {
-              status: "failed",
-              message: failureMessage,
-              at: new Date(),
+          {
+            $setOnInsert: {
+              paymentNumber: randomPaymentNumber(),
+              orderId,
+              orderNumber: payload.orderNumber || "",
+              userId: String(payload.userId || "unknown"),
+              amount: toNumber(payload.totalAmount, 0),
+              currency: "INR",
+              method: "stripe",
+              status: "pending",
+              gatewayStatus: "awaiting_intent",
+              message: "Awaiting Stripe payment initialization",
+              metadata: {
+                source: "order.event",
+              },
+              history: [
+                {
+                  status: "pending",
+                  message: "Order created event received",
+                },
+              ],
             },
           },
+          {
+            upsert: true,
+            new: true,
+            setDefaultsOnInsert: true,
+          }
+        );
+
+        await invalidatePaymentCache({
+          paymentId: String(createdPayment?._id || ""),
+          orderId,
+        });
+      } catch (error) {
+        if (error?.code !== 11000) {
+          throw error;
         }
-      );
+      }
     }
+
+    if (eventType === "order.status_updated") {
+      const orderId = String(payload.orderId || "").trim();
+      if (orderId && ["cancelled", "failed"].includes(String(payload.currentStatus || "").trim())) {
+        const failureMessage =
+          String(payload.currentStatus || "").trim() === "failed"
+            ? "Order failed before payment completion"
+            : "Order cancelled before payment";
+
+        const result = await Payment.updateMany(
+          {
+            orderId,
+            status: "pending",
+          },
+          {
+            $set: {
+              status: "failed",
+              gatewayStatus: "cancelled",
+              message: failureMessage,
+            },
+            $push: {
+              history: {
+                status: "failed",
+                message: failureMessage,
+                at: new Date(),
+              },
+            },
+          }
+        );
+
+        if (Number(result.modifiedCount || 0) > 0) {
+          await invalidatePaymentCache({ orderId });
+        }
+      }
+    }
+
+    await EventInbox.updateOne(
+      { eventId },
+      {
+        $set: {
+          processedAt: new Date(),
+        },
+      }
+    );
+  } catch (error) {
+    if (inboxCreated) {
+      await EventInbox.deleteOne({ eventId });
+    }
+    throw error;
   }
 
   return res.status(200).json({ ok: true });

@@ -2,6 +2,7 @@ require("dotenv").config();
 const dns = require("node:dns/promises");
 const mongoose = require("mongoose");
 const app = require("./src/app");
+const { startOutboxWorker, stopOutboxWorker } = require("./src/events/publisher");
 
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
@@ -13,6 +14,7 @@ async function startServer() {
       serverSelectionTimeoutMS: 10000,
     });
     console.log("Payment Service connected to MongoDB");
+    startOutboxWorker();
 
     app.listen(PORT, () => {
       console.log(`Payment Service running on port ${PORT}`);
@@ -24,3 +26,13 @@ async function startServer() {
 }
 
 startServer();
+
+process.on("SIGINT", () => {
+  stopOutboxWorker();
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  stopOutboxWorker();
+  process.exit(0);
+});

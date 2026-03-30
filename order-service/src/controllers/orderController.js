@@ -201,6 +201,19 @@ async function mutateCart(userId, mutator) {
   throw new Error("Unable to update cart due to concurrent updates");
 }
 
+async function saveOrderSafely(order) {
+  try {
+    await order.save();
+  } catch (error) {
+    if (error.name === "VersionError") {
+      const conflict = new Error("Order update conflict detected. Please retry.");
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    throw error;
+  }
+}
+
 exports.listMedicines = async (req, res) => {
   const medicines = await inventoryClient.fetchMedicines({
     q: req.query.q,
@@ -433,43 +446,64 @@ exports.checkout = async (req, res) => {
     const deliveryFee = 0;
     const totalAmount = Number((cart.subtotal + tax + deliveryFee).toFixed(2));
 
-    const order = await Order.create({
-      orderNumber,
-      userId,
-      items: cart.items.map((item) => ({
-        medicineId: item.medicineId,
-        medicineName: item.medicineName,
-        category: item.category,
-        imageData: item.imageData || "",
-        unitPrice: item.unitPrice,
-        quantity: item.quantity,
-        lineTotal: item.lineTotal,
-      })),
-      totalItems: cart.totalItems,
-      subtotal: cart.subtotal,
-      tax,
-      deliveryFee,
-      totalAmount,
-      currency: cart.currency,
-      pickupSlot: {
-        date: new Date(requestedSlot.date),
-        label: requestedSlot.label,
-      },
-      address: selectedAddress,
-      status: "payment_pending",
-      paymentStatus: "pending",
-      inventoryStatus: "reserved",
-      idempotencyKey: idempotencyKey || undefined,
-      note,
-      statusHistory: [
-        {
-          status: "payment_pending",
-          updatedBy: userId,
-          note: "Order created and waiting for payment",
+    let order;
+
+    try {
+      order = await Order.create({
+        orderNumber,
+        userId,
+        items: cart.items.map((item) => ({
+          medicineId: item.medicineId,
+          medicineName: item.medicineName,
+          category: item.category,
+          imageData: item.imageData || "",
+          unitPrice: item.unitPrice,
+          quantity: item.quantity,
+          lineTotal: item.lineTotal,
+        })),
+        totalItems: cart.totalItems,
+        subtotal: cart.subtotal,
+        tax,
+        deliveryFee,
+        totalAmount,
+        currency: cart.currency,
+        pickupSlot: {
+          date: new Date(requestedSlot.date),
+          label: requestedSlot.label,
         },
-      ],
-      placedAt: new Date(),
-    });
+        address: selectedAddress,
+        status: "payment_pending",
+        paymentStatus: "pending",
+        inventoryStatus: "reserved",
+        idempotencyKey: idempotencyKey || undefined,
+        note,
+        statusHistory: [
+          {
+            status: "payment_pending",
+            updatedBy: userId,
+            note: "Order created and waiting for payment",
+          },
+        ],
+        placedAt: new Date(),
+      });
+    } catch (error) {
+      const duplicateKeyError = error?.code === 11000;
+      if (!duplicateKeyError || !idempotencyKey) {
+        throw error;
+      }
+
+      const existingOrder = await Order.findOne({ userId, idempotencyKey }).sort({ createdAt: -1 });
+      if (existingOrder) {
+        if (stockReserved) {
+          await inventoryClient.releaseStock(cart.items, orderNumber);
+        }
+        return res.status(200).json({
+          message: "Order already created for this idempotency key",
+          order: formatOrder(existingOrder),
+        });
+      }
+      throw error;
+    }
 
     cart.items = [];
     cart.recalculate();
@@ -555,7 +589,7 @@ exports.updateOrderStatus = async (req, res) => {
     note,
   });
 
-  await order.save();
+  await saveOrderSafely(order);
   await eventPublisher.publishOrderStatusUpdated(order, previousStatus);
 
   return res.status(200).json({
@@ -602,7 +636,7 @@ exports.updatePaymentStatusInternal = async (req, res) => {
     note: `Payment status updated to ${paymentStatus}`,
   });
 
-  await order.save();
+  await saveOrderSafely(order);
 
   if (order.status !== previousStatus) {
     await eventPublisher.publishOrderStatusUpdated(order, previousStatus);

@@ -49,6 +49,23 @@ function cloneBatches(medicine) {
   }));
 }
 
+async function withVersionRetries(handler, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+    try {
+      return await handler();
+    } catch (error) {
+      if (error?.name === "VersionError" && attempt < maxRetries) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  const conflict = new Error("Concurrent inventory update conflict. Please retry.");
+  conflict.statusCode = 409;
+  throw conflict;
+}
+
 async function rollbackSnapshots(snapshots) {
   for (const snapshot of [...snapshots].reverse()) {
     const medicine = await Medicine.findById(snapshot.medicineId);
@@ -259,137 +276,66 @@ async function verifyStock(items) {
 }
 
 async function reserveStock(items, reference) {
-  const normalizedItems = normalizeItems(items);
-  const reservationReference = String(reference || "").trim();
+  return withVersionRetries(async () => {
+    const normalizedItems = normalizeItems(items);
+    const reservationReference = String(reference || "").trim();
 
-  if (!normalizedItems.length) {
-    return { ok: true };
-  }
-
-  if (!reservationReference) {
-    return { ok: false, message: "reference is required for stock reservation" };
-  }
-
-  const snapshots = [];
-
-  try {
-    for (const item of normalizedItems) {
-      const medicine = await Medicine.findById(item.medicineId);
-      if (!medicine || !medicine.isActive) {
-        await rollbackSnapshots(snapshots);
-        return { ok: false, message: `Insufficient stock for medicine ${item.medicineId}` };
-      }
-
-      const batches = getMedicineBatches(medicine);
-      const summary = summarizeMedicineBatches({ batches });
-      if (summary.availableStock < item.quantity) {
-        await rollbackSnapshots(snapshots);
-        return { ok: false, message: `Insufficient stock for medicine ${item.medicineId}` };
-      }
-
-      snapshots.push({
-        medicineId: item.medicineId,
-        batches: cloneBatches(medicine),
-      });
-
-      reserveAcrossBatches(batches, item.quantity, reservationReference);
-      medicine.batches = batches;
-      syncMedicineInventoryFields(medicine);
-      await medicine.save();
+    if (!normalizedItems.length) {
+      return { ok: true };
     }
-  } catch (error) {
-    await rollbackSnapshots(snapshots);
-    throw error;
-  }
 
-  return { ok: true };
+    if (!reservationReference) {
+      return { ok: false, message: "reference is required for stock reservation" };
+    }
+
+    const snapshots = [];
+
+    try {
+      for (const item of normalizedItems) {
+        const medicine = await Medicine.findById(item.medicineId);
+        if (!medicine || !medicine.isActive) {
+          await rollbackSnapshots(snapshots);
+          return { ok: false, message: `Insufficient stock for medicine ${item.medicineId}` };
+        }
+
+        const batches = getMedicineBatches(medicine);
+        const summary = summarizeMedicineBatches({ batches });
+        if (summary.availableStock < item.quantity) {
+          await rollbackSnapshots(snapshots);
+          return { ok: false, message: `Insufficient stock for medicine ${item.medicineId}` };
+        }
+
+        snapshots.push({
+          medicineId: item.medicineId,
+          batches: cloneBatches(medicine),
+        });
+
+        reserveAcrossBatches(batches, item.quantity, reservationReference);
+        medicine.batches = batches;
+        syncMedicineInventoryFields(medicine);
+        await medicine.save();
+      }
+    } catch (error) {
+      await rollbackSnapshots(snapshots);
+      throw error;
+    }
+
+    return { ok: true };
+  });
 }
 
 async function releaseStock(items, reference) {
-  const normalizedItems = normalizeItems(items);
-  const reservationReference = String(reference || "").trim();
+  return withVersionRetries(async () => {
+    const normalizedItems = normalizeItems(items);
+    const reservationReference = String(reference || "").trim();
 
-  for (const item of normalizedItems) {
-    const medicine = await Medicine.findById(item.medicineId);
-    if (!medicine) {
-      continue;
-    }
-
-    const batches = getMedicineBatches(medicine);
-    let remaining = item.quantity;
-
-    if (reservationReference) {
-      for (const batch of batches) {
-        if (remaining <= 0) {
-          break;
-        }
-
-        remaining -= releaseReservationFromBatch(batch, remaining, reservationReference);
-      }
-    }
-
-    if (remaining > 0) {
-      for (const batch of batches) {
-        if (remaining <= 0) {
-          break;
-        }
-
-        remaining -= releaseReservationFromBatch(batch, remaining, "");
-      }
-    }
-
-    medicine.batches = batches;
-    syncMedicineInventoryFields(medicine);
-    await medicine.save();
-  }
-
-  return { ok: true };
-}
-
-async function deductStock(items, reference) {
-  const normalizedItems = normalizeItems(items);
-  const reservationReference = String(reference || "").trim();
-
-  if (!normalizedItems.length) {
-    return { ok: true };
-  }
-
-  const snapshots = [];
-
-  try {
     for (const item of normalizedItems) {
       const medicine = await Medicine.findById(item.medicineId);
-      if (!medicine || !medicine.isActive) {
-        await rollbackSnapshots(snapshots);
-        return { ok: false, message: `Medicine ${item.medicineId} not found` };
+      if (!medicine) {
+        continue;
       }
 
       const batches = getMedicineBatches(medicine);
-      const summary = summarizeMedicineBatches({ batches });
-      const reservedForReference = getReservedQuantityForReference(batches, reservationReference);
-      const totalDeliverable = summary.availableStock + reservedForReference;
-
-      if (totalDeliverable < item.quantity) {
-        await rollbackSnapshots(snapshots);
-        return {
-          ok: false,
-          message: `Insufficient stock for medicine ${item.medicineId}`,
-          unavailable: [
-            buildUnavailableEntry(
-              item.medicineId,
-              item.quantity,
-              totalDeliverable,
-              "insufficient_stock"
-            ),
-          ],
-        };
-      }
-
-      snapshots.push({
-        medicineId: item.medicineId,
-        batches: cloneBatches(medicine),
-      });
-
       let remaining = item.quantity;
 
       if (reservationReference) {
@@ -398,40 +344,117 @@ async function deductStock(items, reference) {
             break;
           }
 
-          remaining -= deductReservedFromBatch(batch, remaining, reservationReference);
+          remaining -= releaseReservationFromBatch(batch, remaining, reservationReference);
         }
       }
 
       if (remaining > 0) {
-        remaining -= deductAvailableFromBatches(batches, remaining);
-      }
+        for (const batch of batches) {
+          if (remaining <= 0) {
+            break;
+          }
 
-      if (remaining > 0) {
-        await rollbackSnapshots(snapshots);
-        return {
-          ok: false,
-          message: `Insufficient stock for medicine ${item.medicineId}`,
-          unavailable: [
-            buildUnavailableEntry(
-              item.medicineId,
-              item.quantity,
-              totalDeliverable - remaining,
-              "insufficient_stock"
-            ),
-          ],
-        };
+          remaining -= releaseReservationFromBatch(batch, remaining, "");
+        }
       }
 
       medicine.batches = batches;
       syncMedicineInventoryFields(medicine);
       await medicine.save();
     }
-  } catch (error) {
-    await rollbackSnapshots(snapshots);
-    throw error;
-  }
 
-  return { ok: true };
+    return { ok: true };
+  });
+}
+
+async function deductStock(items, reference) {
+  return withVersionRetries(async () => {
+    const normalizedItems = normalizeItems(items);
+    const reservationReference = String(reference || "").trim();
+
+    if (!normalizedItems.length) {
+      return { ok: true };
+    }
+
+    const snapshots = [];
+
+    try {
+      for (const item of normalizedItems) {
+        const medicine = await Medicine.findById(item.medicineId);
+        if (!medicine || !medicine.isActive) {
+          await rollbackSnapshots(snapshots);
+          return { ok: false, message: `Medicine ${item.medicineId} not found` };
+        }
+
+        const batches = getMedicineBatches(medicine);
+        const summary = summarizeMedicineBatches({ batches });
+        const reservedForReference = getReservedQuantityForReference(batches, reservationReference);
+        const totalDeliverable = summary.availableStock + reservedForReference;
+
+        if (totalDeliverable < item.quantity) {
+          await rollbackSnapshots(snapshots);
+          return {
+            ok: false,
+            message: `Insufficient stock for medicine ${item.medicineId}`,
+            unavailable: [
+              buildUnavailableEntry(
+                item.medicineId,
+                item.quantity,
+                totalDeliverable,
+                "insufficient_stock"
+              ),
+            ],
+          };
+        }
+
+        snapshots.push({
+          medicineId: item.medicineId,
+          batches: cloneBatches(medicine),
+        });
+
+        let remaining = item.quantity;
+
+        if (reservationReference) {
+          for (const batch of batches) {
+            if (remaining <= 0) {
+              break;
+            }
+
+            remaining -= deductReservedFromBatch(batch, remaining, reservationReference);
+          }
+        }
+
+        if (remaining > 0) {
+          remaining -= deductAvailableFromBatches(batches, remaining);
+        }
+
+        if (remaining > 0) {
+          await rollbackSnapshots(snapshots);
+          return {
+            ok: false,
+            message: `Insufficient stock for medicine ${item.medicineId}`,
+            unavailable: [
+              buildUnavailableEntry(
+                item.medicineId,
+                item.quantity,
+                totalDeliverable - remaining,
+                "insufficient_stock"
+              ),
+            ],
+          };
+        }
+
+        medicine.batches = batches;
+        syncMedicineInventoryFields(medicine);
+        await medicine.save();
+      }
+    } catch (error) {
+      await rollbackSnapshots(snapshots);
+      throw error;
+    }
+
+    return { ok: true };
+  });
 }
 
 module.exports = {

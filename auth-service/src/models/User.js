@@ -37,7 +37,7 @@ const userSchema = new mongoose.Schema({
         trim: true,
         maxlength: 20
     }
-}, { timestamps: true });
+}, { timestamps: true, optimisticConcurrency: true });
 
 // Modern Pre-Save Hook (No 'next' needed!)
 userSchema.pre('save', async function() {

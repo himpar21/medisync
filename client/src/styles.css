@@ -2024,6 +2024,30 @@ a {
   background: linear-gradient(180deg, #ffffff 0%, #f8fefe 100%);
 }
 
+.order-preview-card-more {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  text-align: center;
+  min-height: 94px;
+  background: linear-gradient(180deg, #f8fefe 0%, #eef9f9 100%);
+}
+
+.order-preview-more-count {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: var(--netmeds-green-dark);
+  line-height: 1;
+}
+
+.order-preview-more-label {
+  margin-top: 4px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--netmeds-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
 .order-preview-media {
   display: flex;
   align-items: center;

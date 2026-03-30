@@ -1,4 +1,6 @@
 const axios = require("axios");
+const { randomUUID } = require("node:crypto");
+const OutboxEvent = require("../models/OutboxEvent");
 
 const ANALYTICS_EVENT_URL = process.env.ANALYTICS_EVENT_URL || "";
 const ORDER_SERVICE_INTERNAL_URL =
@@ -6,66 +8,214 @@ const ORDER_SERVICE_INTERNAL_URL =
 const INTERNAL_SERVICE_SECRET = process.env.INTERNAL_SERVICE_SECRET || "";
 const NOTIFICATION_WEBHOOK_URL = process.env.NOTIFICATION_WEBHOOK_URL || "";
 
-async function dispatch(url, payload, headers = {}) {
-  if (!url) {
-    return;
-  }
+const OUTBOX_POLL_MS = Math.max(500, Number(process.env.PAYMENT_OUTBOX_POLL_MS || 1500));
+const OUTBOX_BATCH_SIZE = Math.max(1, Number(process.env.PAYMENT_OUTBOX_BATCH_SIZE || 20));
+const OUTBOX_MAX_ATTEMPTS = Math.max(1, Number(process.env.PAYMENT_OUTBOX_MAX_ATTEMPTS || 8));
+const OUTBOX_BASE_BACKOFF_MS = Math.max(250, Number(process.env.PAYMENT_OUTBOX_BASE_BACKOFF_MS || 1200));
 
-  try {
-    await axios.post(url, payload, { timeout: 4000, headers });
-  } catch (error) {
-    console.warn("Dispatch failed:", error.message);
-  }
+function getDefaultHeaders(event) {
+  return {
+    ...(INTERNAL_SERVICE_SECRET ? { "x-internal-secret": INTERNAL_SERVICE_SECRET } : {}),
+    "x-event-id": event.eventId,
+    "x-event-source": "payment-service",
+  };
 }
 
-async function publishAnalyticsEvent(eventType, payload) {
-  if (!ANALYTICS_EVENT_URL) {
-    return;
+function buildTargetsForPayload(payload) {
+  const targets = [];
+
+  if (ANALYTICS_EVENT_URL) {
+    targets.push({
+      name: "analytics-service",
+      url: ANALYTICS_EVENT_URL,
+      method: "POST",
+      bodyType: "event",
+    });
   }
 
-  await dispatch(
-    ANALYTICS_EVENT_URL,
-    {
+  if (ORDER_SERVICE_INTERNAL_URL && payload?.orderSync?.orderId) {
+    targets.push({
+      name: "order-service",
+      url: `${ORDER_SERVICE_INTERNAL_URL}/${payload.orderSync.orderId}/payment-status`,
+      method: "PATCH",
+      bodyType: "order_sync",
+    });
+  }
+
+  if (NOTIFICATION_WEBHOOK_URL && payload?.notification) {
+    targets.push({
+      name: "notification-webhook",
+      url: NOTIFICATION_WEBHOOK_URL,
+      method: "POST",
+      bodyType: "notification",
+    });
+  }
+
+  return targets;
+}
+
+async function enqueueEvent(eventType, payload) {
+  const targets = buildTargetsForPayload(payload);
+  if (!targets.length) {
+    return null;
+  }
+
+  return OutboxEvent.create({
+    eventId: randomUUID(),
     eventType,
     payload,
-    emittedAt: new Date().toISOString(),
-    },
-    INTERNAL_SERVICE_SECRET
-      ? {
-          "x-internal-secret": INTERNAL_SERVICE_SECRET,
-        }
-      : {}
-  );
+    targets,
+    emittedAt: new Date(),
+    status: "pending",
+    attempts: 0,
+    nextAttemptAt: new Date(),
+  });
 }
 
-async function syncOrderPayment(orderId, paymentStatus, status) {
-  if (!ORDER_SERVICE_INTERNAL_URL || !orderId) {
+function computeBackoffMs(attempts) {
+  return Math.floor(OUTBOX_BASE_BACKOFF_MS * 2 ** Math.min(Math.max(0, attempts - 1), 6) + Math.random() * 250);
+}
+
+function buildTargetRequest(event, target) {
+  if (target.bodyType === "order_sync") {
+    return {
+      method: "PATCH",
+      data: {
+        paymentStatus: event.payload?.orderSync?.paymentStatus,
+        status: event.payload?.orderSync?.status,
+      },
+    };
+  }
+
+  if (target.bodyType === "notification") {
+    return {
+      method: "POST",
+      data: event.payload?.notification || {},
+    };
+  }
+
+  return {
+    method: "POST",
+    data: {
+      eventId: event.eventId,
+      source: "payment-service",
+      eventType: event.eventType,
+      payload: event.payload?.analytics || event.payload || {},
+      emittedAt: event.emittedAt,
+    },
+  };
+}
+
+async function dispatchTarget(event, target) {
+  const targetRequest = buildTargetRequest(event, target);
+  await axios.request({
+    method: targetRequest.method || target.method || "POST",
+    url: target.url,
+    data: targetRequest.data,
+    timeout: Number(process.env.PAYMENT_EVENT_TIMEOUT_MS || 5000),
+    headers: getDefaultHeaders(event),
+  });
+}
+
+async function dispatchEvent(event) {
+  await Promise.all(event.targets.map((target) => dispatchTarget(event, target)));
+}
+
+let workerTimer = null;
+let isWorkerRunning = false;
+
+async function processOutboxBatch() {
+  if (isWorkerRunning) {
+    return;
+  }
+  isWorkerRunning = true;
+
+  try {
+    const dueEvents = await OutboxEvent.find({
+      status: "pending",
+      nextAttemptAt: { $lte: new Date() },
+    })
+      .sort({ nextAttemptAt: 1, createdAt: 1 })
+      .limit(OUTBOX_BATCH_SIZE);
+
+    for (const event of dueEvents) {
+      const claimed = await OutboxEvent.findOneAndUpdate(
+        {
+          _id: event._id,
+          status: "pending",
+          nextAttemptAt: { $lte: new Date() },
+        },
+        {
+          $set: { status: "processing" },
+          $inc: { attempts: 1 },
+        },
+        { new: true }
+      );
+
+      if (!claimed) {
+        continue;
+      }
+
+      try {
+        await dispatchEvent(claimed);
+        await OutboxEvent.updateOne(
+          { _id: claimed._id },
+          {
+            $set: {
+              status: "sent",
+              lastError: "",
+              nextAttemptAt: new Date(8640000000000000),
+            },
+          }
+        );
+      } catch (error) {
+        const attempts = Number(claimed.attempts || 1);
+        const maxedOut = attempts >= OUTBOX_MAX_ATTEMPTS;
+
+        await OutboxEvent.updateOne(
+          { _id: claimed._id },
+          {
+            $set: {
+              status: maxedOut ? "failed" : "pending",
+              nextAttemptAt: maxedOut
+                ? new Date(8640000000000000)
+                : new Date(Date.now() + computeBackoffMs(attempts)),
+              lastError: String(error?.message || "event dispatch failed").slice(0, 500),
+            },
+          }
+        );
+      }
+    }
+  } finally {
+    isWorkerRunning = false;
+  }
+}
+
+function startOutboxWorker() {
+  if (workerTimer) {
     return;
   }
 
-  try {
-    await axios.patch(
-      `${ORDER_SERVICE_INTERNAL_URL}/${orderId}/payment-status`,
-      {
-        paymentStatus,
-        status,
-      },
-      {
-        timeout: 4000,
-        headers: INTERNAL_SERVICE_SECRET
-          ? {
-              "x-internal-secret": INTERNAL_SERVICE_SECRET,
-            }
-          : {},
-      }
-    );
-  } catch (error) {
-    console.warn("Order payment sync failed:", error.message);
-  }
+  workerTimer = setInterval(() => {
+    processOutboxBatch().catch((error) => {
+      console.warn("Payment outbox worker cycle failed:", error.message);
+    });
+  }, OUTBOX_POLL_MS);
+
+  workerTimer.unref?.();
 }
 
-async function sendNotification(payment, eventType) {
-  const message = {
+function stopOutboxWorker() {
+  if (!workerTimer) {
+    return;
+  }
+
+  clearInterval(workerTimer);
+  workerTimer = null;
+}
+
+function toNotificationMessage(payment, eventType) {
+  return {
     eventType,
     paymentId: String(payment._id),
     paymentNumber: payment.paymentNumber,
@@ -79,14 +229,11 @@ async function sendNotification(payment, eventType) {
     message: payment.message,
     sentAt: new Date().toISOString(),
   };
-
-  console.log("[PaymentNotification]", message);
-  await dispatch(NOTIFICATION_WEBHOOK_URL, message);
 }
 
 async function publishPaymentSucceeded(payment) {
-  await Promise.all([
-    publishAnalyticsEvent("payment.succeeded", {
+  await enqueueEvent("payment.succeeded", {
+    analytics: {
       paymentId: String(payment._id),
       paymentNumber: payment.paymentNumber,
       orderId: payment.orderId,
@@ -97,15 +244,19 @@ async function publishPaymentSucceeded(payment) {
       paidAt: payment.paidAt || new Date().toISOString(),
       method: payment.method,
       transactionRef: payment.transactionRef,
-    }),
-    syncOrderPayment(payment.orderId, "paid", "confirmed"),
-    sendNotification(payment, "payment.succeeded"),
-  ]);
+    },
+    orderSync: {
+      orderId: payment.orderId,
+      paymentStatus: "paid",
+      status: "confirmed",
+    },
+    notification: toNotificationMessage(payment, "payment.succeeded"),
+  });
 }
 
 async function publishPaymentFailed(payment) {
-  await Promise.all([
-    publishAnalyticsEvent("payment.failed", {
+  await enqueueEvent("payment.failed", {
+    analytics: {
       paymentId: String(payment._id),
       paymentNumber: payment.paymentNumber,
       orderId: payment.orderId,
@@ -117,13 +268,19 @@ async function publishPaymentFailed(payment) {
       method: payment.method,
       transactionRef: payment.transactionRef,
       message: payment.message,
-    }),
-    syncOrderPayment(payment.orderId, "failed", "payment_pending"),
-    sendNotification(payment, "payment.failed"),
-  ]);
+    },
+    orderSync: {
+      orderId: payment.orderId,
+      paymentStatus: "failed",
+      status: "payment_pending",
+    },
+    notification: toNotificationMessage(payment, "payment.failed"),
+  });
 }
 
 module.exports = {
   publishPaymentSucceeded,
   publishPaymentFailed,
+  startOutboxWorker,
+  stopOutboxWorker,
 };

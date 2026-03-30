@@ -7,6 +7,7 @@ import { getMedicineById } from "../services/inventoryService";
 import { CartContext } from "../context/CartContext";
 
 const STAR_VALUES = [1, 2, 3, 4, 5];
+const ORDER_PREVIEW_LIMIT = 3;
 
 const formatMoney = (value) => `Rs ${Number(value || 0).toFixed(2)}`;
 const formatDateTime = (value) => (value ? new Date(value).toLocaleString() : "N/A");
@@ -328,6 +329,8 @@ const Orders = () => {
           const tax = Number(
             order.tax ?? Math.max(0, Number(order.totalAmount || 0) - subtotal - deliveryFee)
           );
+          const previewItems = order.items.slice(0, ORDER_PREVIEW_LIMIT);
+          const hiddenItemCount = Math.max(0, order.items.length - ORDER_PREVIEW_LIMIT);
 
           return (
             <article
@@ -349,7 +352,7 @@ const Orders = () => {
 
               {!isExpanded ? (
                 <div className="order-preview-list">
-                  {order.items.map((item, index) => (
+                  {previewItems.map((item, index) => (
                     <div
                       key={`${order.id}-preview-${item.medicineId || item.medicineName || index}`}
                       className="order-preview-card"
@@ -371,6 +374,12 @@ const Orders = () => {
                       </div>
                     </div>
                   ))}
+                  {hiddenItemCount > 0 ? (
+                    <div className="order-preview-card order-preview-card-more" aria-label={`${hiddenItemCount} more items`}>
+                      <span className="order-preview-more-count">+{hiddenItemCount}</span>
+                      <span className="order-preview-more-label">More items</span>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 

@@ -1,11 +1,20 @@
-const axios = require("axios");
+const { createHttpClient } = require("./httpClient");
+const cache = require("./cache");
 
 const INVENTORY_URL = process.env.INVENTORY_SERVICE_URL || "http://127.0.0.1:5002";
+const INVENTORY_CACHE_TTL_SECONDS = Math.max(
+  5,
+  Number(process.env.INVENTORY_CACHE_TTL_SECONDS || 15)
+);
 
-const inventoryApi = axios.create({
+const inventoryApi = createHttpClient({
   baseURL: INVENTORY_URL,
-  timeout: 5000,
+  timeout: Number(process.env.INVENTORY_TIMEOUT_MS || 5000),
+  serviceName: "inventory-service",
 });
+
+const MEDICINE_LIST_CACHE_PREFIX = "inventory:list:";
+const MEDICINE_ITEM_CACHE_PREFIX = "inventory:item:";
 
 function normalizeRemoteMedicines(payload) {
   if (Array.isArray(payload)) {
@@ -23,39 +32,74 @@ function normalizeRemoteMedicines(payload) {
   return [];
 }
 
-function buildInventoryError(error, operation) {
-  const upstreamStatus = error?.response?.status;
-  const upstreamMessage =
-    error?.response?.data?.message ||
-    error?.response?.data?.error ||
-    error?.message ||
-    "Inventory service unavailable";
+function normalizeFilterKey(filters = {}) {
+  const q = String(filters.q || "").trim().toLowerCase();
+  const category = String(filters.category || "").trim().toLowerCase();
+  return `${q}|${category}`;
+}
 
-  const serviceError = new Error(`Inventory service ${operation} failed: ${upstreamMessage}`);
-  serviceError.statusCode = Number.isInteger(upstreamStatus) ? upstreamStatus : 502;
-  return serviceError;
+async function clearInventoryReadCache() {
+  await Promise.all([
+    cache.delByPrefix(MEDICINE_LIST_CACHE_PREFIX),
+    cache.delByPrefix(MEDICINE_ITEM_CACHE_PREFIX),
+  ]);
 }
 
 async function fetchMedicines(filters = {}) {
-  try {
-    const response = await inventoryApi.get("/api/inventory/medicines", {
-      params: filters,
-    });
-    return normalizeRemoteMedicines(response.data);
-  } catch (error) {
-    throw buildInventoryError(error, "fetch");
+  const cacheKey = `${MEDICINE_LIST_CACHE_PREFIX}${normalizeFilterKey(filters)}`;
+  const cached = await cache.getJSON(cacheKey);
+  if (cached) {
+    return cached;
   }
+
+  const response = await inventoryApi.request(
+    {
+      method: "GET",
+      url: "/api/inventory/medicines",
+      params: filters,
+    },
+    {
+      maxRetries: 2,
+    }
+  );
+
+  const medicines = normalizeRemoteMedicines(response.data);
+  await cache.setJSON(cacheKey, medicines, INVENTORY_CACHE_TTL_SECONDS);
+  return medicines;
 }
 
 async function getMedicineById(medicineId) {
+  const key = String(medicineId || "").trim();
+  if (!key) {
+    return null;
+  }
+
+  const cacheKey = `${MEDICINE_ITEM_CACHE_PREFIX}${key}`;
+  const cached = await cache.getJSON(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   try {
-    const response = await inventoryApi.get(`/api/inventory/medicines/${medicineId}`);
-    return response.data?.medicine || response.data || null;
+    const response = await inventoryApi.request(
+      {
+        method: "GET",
+        url: `/api/inventory/medicines/${key}`,
+      },
+      {
+        maxRetries: 2,
+      }
+    );
+    const medicine = response.data?.medicine || response.data || null;
+    if (medicine) {
+      await cache.setJSON(cacheKey, medicine, INVENTORY_CACHE_TTL_SECONDS);
+    }
+    return medicine;
   } catch (error) {
-    if (error?.response?.status === 404) {
+    if (error.statusCode === 404) {
       return null;
     }
-    throw buildInventoryError(error, "lookup");
+    throw error;
   }
 }
 
@@ -67,15 +111,22 @@ async function verifyStock(items) {
     })),
   };
 
-  try {
-    const response = await inventoryApi.post("/api/inventory/stock/verify", payload);
-    if (typeof response.data?.ok === "boolean") {
-      return response.data;
+  const response = await inventoryApi.request(
+    {
+      method: "POST",
+      url: "/api/inventory/stock/verify",
+      data: payload,
+    },
+    {
+      maxRetries: 2,
     }
-    return { ok: true, unavailable: [] };
-  } catch (error) {
-    throw buildInventoryError(error, "stock verification");
+  );
+
+  if (typeof response.data?.ok === "boolean") {
+    return response.data;
   }
+
+  return { ok: true, unavailable: [] };
 }
 
 async function reserveStock(items, reference) {
@@ -88,14 +139,34 @@ async function reserveStock(items, reference) {
   };
 
   try {
-    await inventoryApi.post("/api/inventory/stock/reserve", payload);
+    await inventoryApi.request(
+      {
+        method: "POST",
+        url: "/api/inventory/stock/reserve",
+        data: payload,
+      },
+      {
+        maxRetries: 2,
+      }
+    );
+    await clearInventoryReadCache();
     return { ok: true };
   } catch (reserveError) {
     try {
-      await inventoryApi.post("/api/inventory/stock/deduct", payload);
+      await inventoryApi.request(
+        {
+          method: "POST",
+          url: "/api/inventory/stock/deduct",
+          data: payload,
+        },
+        {
+          maxRetries: 1,
+        }
+      );
+      await clearInventoryReadCache();
       return { ok: true };
     } catch (_deductError) {
-      throw buildInventoryError(reserveError, "stock reservation");
+      throw reserveError;
     }
   }
 }
@@ -109,12 +180,19 @@ async function releaseStock(items, reference) {
     })),
   };
 
-  try {
-    await inventoryApi.post("/api/inventory/stock/release", payload);
-    return { ok: true };
-  } catch (error) {
-    throw buildInventoryError(error, "stock release");
-  }
+  await inventoryApi.request(
+    {
+      method: "POST",
+      url: "/api/inventory/stock/release",
+      data: payload,
+    },
+    {
+      maxRetries: 2,
+    }
+  );
+
+  await clearInventoryReadCache();
+  return { ok: true };
 }
 
 module.exports = {
@@ -123,4 +201,5 @@ module.exports = {
   verifyStock,
   reserveStock,
   releaseStock,
+  clearInventoryReadCache,
 };

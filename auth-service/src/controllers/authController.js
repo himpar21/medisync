@@ -1,6 +1,11 @@
 const bcrypt = require("bcrypt");
 const User = require("../models/User");
 const tokenService = require("../services/tokenService");
+const cache = require("../services/userCache");
+const eventPublisher = require("../services/eventPublisher");
+
+const PROFILE_CACHE_PREFIX = "auth:profile:";
+const USER_LIST_CACHE_KEY = "auth:users:list";
 
 const MALE_BLOCKS = ["A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "P", "Q", "R", "S", "T"];
 const FEMALE_BLOCKS = ["A", "B", "C", "D", "E", "F", "G", "H", "RJT"];
@@ -45,6 +50,17 @@ function formatUser(user) {
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };
+}
+
+function profileCacheKey(userId) {
+  return `${PROFILE_CACHE_PREFIX}${String(userId || "").trim()}`;
+}
+
+async function invalidateUserCaches(userId = "") {
+  if (userId) {
+    await cache.del(profileCacheKey(userId));
+  }
+  await cache.del(USER_LIST_CACHE_KEY);
 }
 
 function getAllowedBlocks(gender) {
@@ -142,7 +158,24 @@ exports.register = async (req, res) => {
       userPayload.roomNo = validation.roomNo;
     }
 
-    const user = await User.create(userPayload);
+    let user;
+    try {
+      user = await User.create(userPayload);
+    } catch (error) {
+      if (error?.code === 11000) {
+        return res.status(409).json({ message: "User already exists" });
+      }
+      throw error;
+    }
+
+    await invalidateUserCaches(String(user._id));
+    eventPublisher.enqueue("auth.user_registered", {
+      userId: String(user._id),
+      role: user.role,
+      email: user.email,
+      occurredAt: new Date().toISOString(),
+    });
+
     return res.status(201).json({
       message: "User registered successfully",
       user: formatUser(user),
@@ -188,13 +221,22 @@ exports.login = async (req, res) => {
 };
 
 exports.getProfile = async (req, res) => {
+  const key = profileCacheKey(req.user.userId);
+  const cached = await cache.get(key);
+  if (cached) {
+    return res.status(200).json({ user: cached });
+  }
+
   const user = await User.findById(req.user.userId).select("-password");
   if (!user) {
     return res.status(404).json({ message: "User not found" });
   }
 
+  const formattedUser = formatUser(user);
+  await cache.set(key, formattedUser, 60);
+
   return res.status(200).json({
-    user: formatUser(user),
+    user: formattedUser,
   });
 };
 
@@ -241,7 +283,22 @@ exports.updateProfile = async (req, res) => {
     user.roomNo = validation.roomNo;
   }
 
-  await user.save();
+  try {
+    await user.save();
+  } catch (error) {
+    if (error?.name === "VersionError") {
+      return res.status(409).json({ message: "Profile update conflict. Please retry." });
+    }
+    throw error;
+  }
+
+  await invalidateUserCaches(String(user._id));
+  eventPublisher.enqueue("auth.user_updated", {
+    userId: String(user._id),
+    role: user.role,
+    occurredAt: new Date().toISOString(),
+  });
+
   return res.status(200).json({
     message: "Profile updated successfully",
     user: formatUser(user),
@@ -249,8 +306,18 @@ exports.updateProfile = async (req, res) => {
 };
 
 exports.listUsers = async (req, res) => {
+  const cached = await cache.get(USER_LIST_CACHE_KEY);
+  if (cached) {
+    return res.status(200).json({
+      items: cached,
+    });
+  }
+
   const users = await User.find({}).sort({ createdAt: -1 }).select("-password").limit(200);
+  const items = users.map(formatUser);
+  await cache.set(USER_LIST_CACHE_KEY, items, 30);
+
   return res.status(200).json({
-    items: users.map(formatUser),
+    items,
   });
 };

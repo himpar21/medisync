@@ -1,8 +1,14 @@
-const axios = require("axios");
 const Report = require("../models/Report");
+const { createHttpClient } = require("./httpClient");
 
 const INVENTORY_SERVICE_URL =
   process.env.INVENTORY_SERVICE_URL || "http://127.0.0.1:5002";
+
+const inventoryClient = createHttpClient({
+  baseURL: INVENTORY_SERVICE_URL,
+  timeout: Number(process.env.INVENTORY_TIMEOUT_MS || 5000),
+  serviceName: "inventory-service",
+});
 
 function toNumber(value, fallback = 0) {
   const parsed = Number(value);
@@ -182,9 +188,16 @@ async function ingestEvent({ eventType, payload, emittedAt }) {
 
 async function fetchTotalMedicines() {
   try {
-    const response = await axios.get(`${INVENTORY_SERVICE_URL}/api/inventory/medicines`, {
-      timeout: 5000,
-    });
+    const response = await inventoryClient.request(
+      {
+        method: "GET",
+        url: "/api/inventory/medicines",
+      },
+      {
+        maxRetries: 2,
+      }
+    );
+
     const items = Array.isArray(response.data?.items) ? response.data.items : [];
     return items.length;
   } catch (error) {
