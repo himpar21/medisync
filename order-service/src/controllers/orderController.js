@@ -50,7 +50,13 @@ async function hydrateCartImages(cart) {
       continue;
     }
 
-    const medicine = await inventoryClient.getMedicineById(item.medicineId);
+    let medicine = null;
+    try {
+      medicine = await inventoryClient.getMedicineById(item.medicineId);
+    } catch (_error) {
+      // Keep cart APIs responsive even when inventory image lookup fails.
+      continue;
+    }
     if (!medicine) {
       continue;
     }
@@ -111,8 +117,12 @@ async function hydrateOrderImages(order) {
     }
 
     if (!imageCache.has(medicineId)) {
-      const medicine = await inventoryClient.getMedicineById(medicineId);
-      imageCache.set(medicineId, String(medicine?.imageData || "").trim());
+      try {
+        const medicine = await inventoryClient.getMedicineById(medicineId);
+        imageCache.set(medicineId, String(medicine?.imageData || "").trim());
+      } catch (_error) {
+        imageCache.set(medicineId, "");
+      }
     }
 
     const imageData = imageCache.get(medicineId) || "";
@@ -535,7 +545,6 @@ exports.getOrderHistory = async (req, res) => {
   const filter = isPrivileged ? {} : { userId: req.user.userId };
 
   const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(100);
-  await Promise.all(orders.map((order) => hydrateOrderImages(order)));
 
   res.status(200).json({
     items: orders.map(formatOrder),

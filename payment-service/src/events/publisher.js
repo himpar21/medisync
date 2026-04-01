@@ -117,8 +117,33 @@ async function dispatchTarget(event, target) {
   });
 }
 
+function isOrderSyncCritical(event) {
+  return Boolean(event?.payload?.orderSync?.orderId);
+}
+
 async function dispatchEvent(event) {
-  await Promise.all(event.targets.map((target) => dispatchTarget(event, target)));
+  const results = await Promise.allSettled(
+    event.targets.map((target) => dispatchTarget(event, target))
+  );
+
+  const failures = results
+    .map((result, index) => ({ result, target: event.targets[index] }))
+    .filter(({ result }) => result.status === "rejected")
+    .map(({ result, target }) => ({
+      target,
+      message: String(result.reason?.message || result.reason || "event dispatch failed"),
+    }));
+
+  if (!failures.length) {
+    return;
+  }
+
+  const errorSummary = failures
+    .map((failure) => `${failure.target?.name || failure.target?.url || "unknown-target"}: ${failure.message}`)
+    .join(" | ")
+    .slice(0, 1000);
+
+  throw new Error(errorSummary);
 }
 
 let workerTimer = null;
@@ -171,13 +196,15 @@ async function processOutboxBatch() {
       } catch (error) {
         const attempts = Number(claimed.attempts || 1);
         const maxedOut = attempts >= OUTBOX_MAX_ATTEMPTS;
+        const shouldRetryIndefinitely = isOrderSyncCritical(claimed);
+        const markAsFailed = maxedOut && !shouldRetryIndefinitely;
 
         await OutboxEvent.updateOne(
           { _id: claimed._id },
           {
             $set: {
-              status: maxedOut ? "failed" : "pending",
-              nextAttemptAt: maxedOut
+              status: markAsFailed ? "failed" : "pending",
+              nextAttemptAt: markAsFailed
                 ? new Date(8640000000000000)
                 : new Date(Date.now() + computeBackoffMs(attempts)),
               lastError: String(error?.message || "event dispatch failed").slice(0, 500),

@@ -305,7 +305,7 @@ const Orders = () => {
       {loading ? <p className="muted">Loading orders...</p> : null}
       {error ? <p className="error-text">{error}</p> : null}
 
-      {!loading && !orders.length ? (
+      {!loading && !error && !orders.length ? (
         <section className="panel" style={{ padding: "20px" }}>
           <p className="muted" style={{ marginTop: 0 }}>
             No orders found.
