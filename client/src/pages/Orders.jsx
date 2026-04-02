@@ -2,6 +2,7 @@ import React, { useContext, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { fetchOrders } from "../services/orderService";
+import { fetchPaymentsByOrder } from "../services/paymentService";
 import MedicineBrowseBar from "../components/common/MedicineBrowseBar";
 import { getMedicineById } from "../services/inventoryService";
 import { CartContext } from "../context/CartContext";
@@ -12,6 +13,48 @@ const ORDER_PREVIEW_LIMIT = 3;
 const formatMoney = (value) => `Rs ${Number(value || 0).toFixed(2)}`;
 const formatDateTime = (value) => (value ? new Date(value).toLocaleString() : "N/A");
 const formatDateOnly = (value) => (value ? new Date(value).toLocaleDateString() : "N/A");
+const normalizePaymentStatus = (value) => String(value || "").trim().toLowerCase();
+
+const reconcilePaidOrders = async (orderItems) => {
+  const unpaidOrders = orderItems.filter(
+    (order) => normalizePaymentStatus(order.paymentStatus) !== "paid"
+  );
+
+  if (!unpaidOrders.length) {
+    return orderItems;
+  }
+
+  const paymentChecks = await Promise.all(
+    unpaidOrders.map(async (order) => {
+      try {
+        const payments = await fetchPaymentsByOrder(order.id);
+        const hasSucceededPayment = payments.some(
+          (payment) => normalizePaymentStatus(payment.status) === "succeeded"
+        );
+        return [order.id, hasSucceededPayment];
+      } catch (_error) {
+        return [order.id, false];
+      }
+    })
+  );
+
+  const paidByOrderId = new Map(paymentChecks);
+  return orderItems.map((order) => {
+    if (!paidByOrderId.get(order.id)) {
+      return order;
+    }
+
+    const shouldPromoteStatus = ["placed", "payment_pending"].includes(
+      normalizePaymentStatus(order.status)
+    );
+
+    return {
+      ...order,
+      paymentStatus: "paid",
+      status: shouldPromoteStatus ? "confirmed" : order.status,
+    };
+  });
+};
 
 const normalizeSavedOrderRating = (savedRating) => {
   if (typeof savedRating === "number") {
@@ -85,22 +128,26 @@ const Orders = () => {
 
   useEffect(() => {
     let mounted = true;
-    fetchOrders()
-      .then((items) => {
+
+    const loadOrders = async () => {
+      try {
+        const items = await fetchOrders();
+        const reconciled = await reconcilePaidOrders(items);
         if (mounted) {
-          setOrders(items);
+          setOrders(reconciled);
         }
-      })
-      .catch((err) => {
+      } catch (err) {
         if (mounted) {
           setError(err.response?.data?.message || "Unable to load orders");
         }
-      })
-      .finally(() => {
+      } finally {
         if (mounted) {
           setLoading(false);
         }
-      });
+      }
+    };
+
+    loadOrders();
 
     return () => {
       mounted = false;
