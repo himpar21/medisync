@@ -218,7 +218,7 @@ const PaymentPage = () => {
             ? {
                 ...current,
                 paymentStatus: "failed",
-                status: "payment_pending",
+                status: "failed",
               }
             : current,
         );
@@ -332,7 +332,7 @@ const PaymentPage = () => {
   ]);
 
   return (
-    <main className="page-wrap checkout-page">
+    <main className="page-wrap checkout-page payment-page">
       <MedicineBrowseBar />
       <h1 className="page-title">Payment</h1>
       <p className="page-subtitle">Complete your payment securely with Stripe.</p>

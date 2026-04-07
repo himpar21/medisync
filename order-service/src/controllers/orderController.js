@@ -2,21 +2,125 @@ const Cart = require("../models/Cart");
 const Order = require("../models/Order");
 const inventoryClient = require("../services/inventoryClient");
 const eventPublisher = require("../services/eventPublisher");
+const cache = require("../services/cache");
 
 const CHECKOUT_LOCK_MS = 2 * 60 * 1000;
 const MAX_ITEM_QUANTITY = 20;
 const ORDER_STATUS = [
   "placed",
   "payment_pending",
+  "failed",
   "confirmed",
   "ready_for_pickup",
   "picked_up",
   "cancelled",
 ];
+const MEDICINE_LIST_CACHE_PREFIX = "order:medicines:";
+const PICKUP_SLOTS_CACHE_PREFIX = "order:pickup-slots:";
+const CART_CACHE_PREFIX = "order:cart:";
+const ORDER_HISTORY_CACHE_PREFIX = "order:history:";
+const ORDER_BY_ID_CACHE_PREFIX = "order:by-id:";
+
+const ORDER_MEDICINE_LIST_CACHE_TTL_SECONDS = Math.max(
+  5,
+  Number(process.env.ORDER_MEDICINE_LIST_CACHE_TTL_SECONDS || 45)
+);
+const ORDER_PICKUP_SLOTS_CACHE_TTL_SECONDS = Math.max(
+  5,
+  Number(process.env.ORDER_PICKUP_SLOTS_CACHE_TTL_SECONDS || 300)
+);
+const ORDER_CART_CACHE_TTL_SECONDS = Math.max(
+  5,
+  Number(process.env.ORDER_CART_CACHE_TTL_SECONDS || 20)
+);
+const ORDER_HISTORY_CACHE_TTL_SECONDS = Math.max(
+  5,
+  Number(process.env.ORDER_HISTORY_CACHE_TTL_SECONDS || 20)
+);
+const ORDER_DETAILS_CACHE_TTL_SECONDS = Math.max(
+  5,
+  Number(process.env.ORDER_DETAILS_CACHE_TTL_SECONDS || 30)
+);
 
 function toNumber(value, defaultValue = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : defaultValue;
+}
+
+function normalizeFilterToken(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function buildMedicineListCacheKey(filters = {}) {
+  const q = normalizeFilterToken(filters.q);
+  const category = normalizeFilterToken(filters.category);
+  return `${MEDICINE_LIST_CACHE_PREFIX}${q}|${category}`;
+}
+
+function buildPickupSlotsCacheKey(days = 4) {
+  const safeDays = Math.max(1, Math.floor(Number(days || 4)));
+  return `${PICKUP_SLOTS_CACHE_PREFIX}${safeDays}`;
+}
+
+function buildCartCacheKey(userId) {
+  return `${CART_CACHE_PREFIX}${String(userId || "").trim()}`;
+}
+
+function buildOrderHistoryCacheKey({ isPrivileged = false, userId = "" } = {}) {
+  if (isPrivileged) {
+    return `${ORDER_HISTORY_CACHE_PREFIX}privileged`;
+  }
+  return `${ORDER_HISTORY_CACHE_PREFIX}user:${String(userId || "").trim()}`;
+}
+
+function buildOrderByIdCacheKey({ orderId = "", isPrivileged = false, userId = "" } = {}) {
+  const safeOrderId = String(orderId || "").trim();
+  if (isPrivileged) {
+    return `${ORDER_BY_ID_CACHE_PREFIX}privileged:${safeOrderId}`;
+  }
+  return `${ORDER_BY_ID_CACHE_PREFIX}user:${String(userId || "").trim()}:${safeOrderId}`;
+}
+
+async function invalidateCartCache(userId) {
+  const safeUserId = String(userId || "").trim();
+  if (!safeUserId) {
+    return;
+  }
+  await cache.delKey(buildCartCacheKey(safeUserId));
+}
+
+async function invalidateOrderReadCaches({ userId = "", orderId = "" } = {}) {
+  const safeUserId = String(userId || "").trim();
+  const safeOrderId = String(orderId || "").trim();
+  const tasks = [cache.delKey(buildOrderHistoryCacheKey({ isPrivileged: true }))];
+
+  if (safeUserId) {
+    tasks.push(cache.delKey(buildOrderHistoryCacheKey({ userId: safeUserId })));
+  }
+
+  if (safeOrderId) {
+    tasks.push(
+      cache.delKey(
+        buildOrderByIdCacheKey({
+          orderId: safeOrderId,
+          isPrivileged: true,
+        })
+      )
+    );
+
+    if (safeUserId) {
+      tasks.push(
+        cache.delKey(
+          buildOrderByIdCacheKey({
+            orderId: safeOrderId,
+            userId: safeUserId,
+          })
+        )
+      );
+    }
+  }
+
+  await Promise.all(tasks);
 }
 
 function formatCart(cart) {
@@ -225,12 +329,18 @@ async function saveOrderSafely(order) {
 }
 
 exports.listMedicines = async (req, res) => {
+  const listCacheKey = buildMedicineListCacheKey(req.query);
+  const cached = await cache.getJSON(listCacheKey);
+  if (cached) {
+    return res.status(200).json(cached);
+  }
+
   const medicines = await inventoryClient.fetchMedicines({
     q: req.query.q,
     category: req.query.category,
   });
 
-  res.status(200).json({
+  const payload = {
     items: medicines.map((medicine) => ({
       id: medicine._id || medicine.id || medicine.medicineId,
       name: medicine.name,
@@ -250,20 +360,45 @@ exports.listMedicines = async (req, res) => {
       expiryDate: medicine.expiryDate || null,
       batchNo: medicine.batchNo || "",
     })),
-  });
+  };
+
+  await cache.setJSON(
+    listCacheKey,
+    payload,
+    ORDER_MEDICINE_LIST_CACHE_TTL_SECONDS
+  );
+
+  res.status(200).json(payload);
 };
 
 exports.getPickupSlots = async (req, res) => {
+  const cacheKey = buildPickupSlotsCacheKey(4);
+  const cached = await cache.getJSON(cacheKey);
+  if (cached) {
+    return res.status(200).json(cached);
+  }
+
   const slots = generatePickupSlots(4);
-  res.status(200).json({ items: slots });
+  const payload = { items: slots };
+  await cache.setJSON(cacheKey, payload, ORDER_PICKUP_SLOTS_CACHE_TTL_SECONDS);
+  res.status(200).json(payload);
 };
 
 exports.getCart = async (req, res) => {
+  const cartCacheKey = buildCartCacheKey(req.user.userId);
+  const cached = await cache.getJSON(cartCacheKey);
+  if (cached) {
+    return res.status(200).json({ cart: cached });
+  }
+
   const cart = await getOrCreateCart(req.user.userId);
   cart.recalculate();
   await hydrateCartImages(cart);
   await cart.save();
-  res.status(200).json({ cart: formatCart(cart) });
+
+  const formattedCart = formatCart(cart);
+  await cache.setJSON(cartCacheKey, formattedCart, ORDER_CART_CACHE_TTL_SECONDS);
+  res.status(200).json({ cart: formattedCart });
 };
 
 exports.addToCart = async (req, res) => {
@@ -307,7 +442,13 @@ exports.addToCart = async (req, res) => {
   });
 
   await hydrateCartImages(cart);
-  return res.status(200).json({ cart: formatCart(cart) });
+  const formattedCart = formatCart(cart);
+  await cache.setJSON(
+    buildCartCacheKey(req.user.userId),
+    formattedCart,
+    ORDER_CART_CACHE_TTL_SECONDS
+  );
+  return res.status(200).json({ cart: formattedCart });
 };
 
 exports.updateCartItem = async (req, res) => {
@@ -347,7 +488,13 @@ exports.updateCartItem = async (req, res) => {
   }
 
   await hydrateCartImages(cart);
-  return res.status(200).json({ cart: formatCart(cart) });
+  const formattedCart = formatCart(cart);
+  await cache.setJSON(
+    buildCartCacheKey(req.user.userId),
+    formattedCart,
+    ORDER_CART_CACHE_TTL_SECONDS
+  );
+  return res.status(200).json({ cart: formattedCart });
 };
 
 exports.removeFromCart = async (req, res) => {
@@ -358,14 +505,26 @@ exports.removeFromCart = async (req, res) => {
   });
 
   await hydrateCartImages(cart);
-  return res.status(200).json({ cart: formatCart(cart) });
+  const formattedCart = formatCart(cart);
+  await cache.setJSON(
+    buildCartCacheKey(req.user.userId),
+    formattedCart,
+    ORDER_CART_CACHE_TTL_SECONDS
+  );
+  return res.status(200).json({ cart: formattedCart });
 };
 
 exports.clearCart = async (req, res) => {
   const cart = await mutateCart(req.user.userId, (editableCart) => {
     editableCart.items = [];
   });
-  return res.status(200).json({ cart: formatCart(cart) });
+  const formattedCart = formatCart(cart);
+  await cache.setJSON(
+    buildCartCacheKey(req.user.userId),
+    formattedCart,
+    ORDER_CART_CACHE_TTL_SECONDS
+  );
+  return res.status(200).json({ cart: formattedCart });
 };
 
 exports.checkout = async (req, res) => {
@@ -522,6 +681,14 @@ exports.checkout = async (req, res) => {
     await cart.save();
 
     await eventPublisher.publishOrderCreated(order);
+    await Promise.all([
+      cache.setJSON(
+        buildCartCacheKey(userId),
+        formatCart(cart),
+        ORDER_CART_CACHE_TTL_SECONDS
+      ),
+      invalidateOrderReadCaches({ userId, orderId: String(order._id) }),
+    ]);
 
     return res.status(201).json({
       message: "Order placed successfully",
@@ -543,16 +710,39 @@ exports.checkout = async (req, res) => {
 exports.getOrderHistory = async (req, res) => {
   const isPrivileged = ["admin", "pharmacist"].includes(req.user.role);
   const filter = isPrivileged ? {} : { userId: req.user.userId };
+  const historyCacheKey = buildOrderHistoryCacheKey({
+    isPrivileged,
+    userId: req.user.userId,
+  });
+  const cached = await cache.getJSON(historyCacheKey);
+
+  if (cached) {
+    return res.status(200).json({
+      items: cached,
+    });
+  }
 
   const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(100);
+  const items = orders.map(formatOrder);
+  await cache.setJSON(historyCacheKey, items, ORDER_HISTORY_CACHE_TTL_SECONDS);
 
   res.status(200).json({
-    items: orders.map(formatOrder),
+    items,
   });
 };
 
 exports.getOrderById = async (req, res) => {
   const isPrivileged = ["admin", "pharmacist"].includes(req.user.role);
+  const orderByIdCacheKey = buildOrderByIdCacheKey({
+    orderId: req.params.orderId,
+    isPrivileged,
+    userId: req.user.userId,
+  });
+  const cached = await cache.getJSON(orderByIdCacheKey);
+  if (cached) {
+    return res.status(200).json({ order: cached });
+  }
+
   const filter = isPrivileged
     ? { _id: req.params.orderId }
     : { _id: req.params.orderId, userId: req.user.userId };
@@ -563,7 +753,13 @@ exports.getOrderById = async (req, res) => {
   }
 
   await hydrateOrderImages(order);
-  return res.status(200).json({ order: formatOrder(order) });
+  const formattedOrder = formatOrder(order);
+  await cache.setJSON(
+    orderByIdCacheKey,
+    formattedOrder,
+    ORDER_DETAILS_CACHE_TTL_SECONDS
+  );
+  return res.status(200).json({ order: formattedOrder });
 };
 
 exports.updateOrderStatus = async (req, res) => {
@@ -587,8 +783,9 @@ exports.updateOrderStatus = async (req, res) => {
   }
 
   order.status = nextStatus;
-  if (nextStatus === "cancelled" && order.inventoryStatus === "reserved") {
-    await inventoryClient.releaseStock(order.items, `cancel-${order.orderNumber}`);
+  if (["cancelled", "failed"].includes(nextStatus) && order.inventoryStatus === "reserved") {
+    const releaseRefPrefix = nextStatus === "failed" ? "failed" : "cancel";
+    await inventoryClient.releaseStock(order.items, `${releaseRefPrefix}-${order.orderNumber}`);
     order.inventoryStatus = "released";
   }
 
@@ -600,6 +797,10 @@ exports.updateOrderStatus = async (req, res) => {
 
   await saveOrderSafely(order);
   await eventPublisher.publishOrderStatusUpdated(order, previousStatus);
+  await invalidateOrderReadCaches({
+    userId: String(order.userId),
+    orderId: String(order._id),
+  });
 
   return res.status(200).json({
     message: "Order status updated",
@@ -629,14 +830,19 @@ exports.updatePaymentStatusInternal = async (req, res) => {
     order.status = requestedOrderStatus;
   } else if (
     paymentStatus === "paid" &&
-    ["placed", "payment_pending"].includes(order.status)
+    ["placed", "payment_pending", "failed"].includes(order.status)
   ) {
     order.status = "confirmed";
   } else if (
     paymentStatus === "failed" &&
     ["placed", "payment_pending"].includes(order.status)
   ) {
-    order.status = "payment_pending";
+    order.status = "failed";
+  }
+
+  if (paymentStatus === "failed" && order.inventoryStatus === "reserved") {
+    await inventoryClient.releaseStock(order.items, `payment-failed-${order.orderNumber}`);
+    order.inventoryStatus = "released";
   }
 
   order.statusHistory.push({
@@ -646,6 +852,10 @@ exports.updatePaymentStatusInternal = async (req, res) => {
   });
 
   await saveOrderSafely(order);
+  await invalidateOrderReadCaches({
+    userId: String(order.userId),
+    orderId: String(order._id),
+  });
 
   if (order.status !== previousStatus) {
     await eventPublisher.publishOrderStatusUpdated(order, previousStatus);

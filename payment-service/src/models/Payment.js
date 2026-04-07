@@ -74,11 +74,15 @@ const paymentSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    orderPlacedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
     stripePaymentIntentId: {
       type: String,
       default: "",
       trim: true,
-      index: true,
     },
     metadata: {
       type: mongoose.Schema.Types.Mixed,
@@ -93,6 +97,7 @@ const paymentSchema = new mongoose.Schema(
 );
 
 paymentSchema.index({ orderId: 1, userId: 1, createdAt: -1 });
+paymentSchema.index({ status: 1, orderPlacedAt: 1, createdAt: 1 });
 paymentSchema.index(
   { orderId: 1, userId: 1, status: 1 },
   {

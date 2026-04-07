@@ -16,6 +16,14 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function toDateOrNull(value) {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function randomPaymentNumber() {
   const now = new Date();
   const yyyy = now.getFullYear();
@@ -107,6 +115,7 @@ function formatPayment(payment) {
     stripePaymentIntentId: payment.stripePaymentIntentId || "",
     message: payment.message,
     paidAt: payment.paidAt,
+    orderPlacedAt: payment.orderPlacedAt,
     history: payment.history,
     createdAt: payment.createdAt,
     updatedAt: payment.updatedAt,
@@ -291,6 +300,7 @@ async function upsertStripePaymentRecord({
   userId,
   amount,
   currency,
+  orderPlacedAt = null,
   paymentIntent,
 }) {
   const intentInfo = mapStripeIntent(paymentIntent);
@@ -318,12 +328,17 @@ async function upsertStripePaymentRecord({
       userId,
       amount,
       currency,
+      orderPlacedAt: orderPlacedAt || null,
     });
   }
+
+  const intentOrderPlacedAt = toDateOrNull(paymentIntent?.metadata?.orderPlacedAt);
+  const effectiveOrderPlacedAt = payment.orderPlacedAt || orderPlacedAt || intentOrderPlacedAt || null;
 
   payment.orderNumber = orderNumber || payment.orderNumber;
   payment.amount = amount;
   payment.currency = currency;
+  payment.orderPlacedAt = effectiveOrderPlacedAt;
   payment.method = intentInfo.method || payment.method || "stripe";
   payment.status = intentInfo.status;
   payment.gatewayStatus = intentInfo.gatewayStatus;
@@ -335,6 +350,7 @@ async function upsertStripePaymentRecord({
     ...(payment.metadata || {}),
     source: "stripe.elements",
     stripePaymentIntentId: paymentIntent.id,
+    orderPlacedAt: effectiveOrderPlacedAt ? effectiveOrderPlacedAt.toISOString() : undefined,
   };
 
   return { payment, intentInfo };
@@ -376,6 +392,7 @@ exports.createPayment = async (req, res) => {
   const fallbackOrderNumber = String(req.body.orderNumber || "").trim();
   const fallbackCurrency = String(req.body.currency || "INR").trim().toUpperCase();
   const fallbackAmount = toNumber(req.body.amount, -1);
+  const fallbackOrderPlacedAt = toDateOrNull(req.body.orderPlacedAt);
 
   if (!orderId) {
     return res.status(400).json({ message: "orderId is required" });
@@ -427,6 +444,7 @@ exports.createPayment = async (req, res) => {
     pendingRecord?.currency || latestPayment?.currency || fallbackCurrency
   ).trim().toUpperCase();
   const amount = toNumber(pendingRecord?.amount ?? latestPayment?.amount, fallbackAmount);
+  const orderPlacedAt = pendingRecord?.orderPlacedAt || latestPayment?.orderPlacedAt || fallbackOrderPlacedAt;
 
   if (!orderNumber || amount <= 0) {
     return res.status(400).json({
@@ -462,6 +480,7 @@ exports.createPayment = async (req, res) => {
       userId: req.user.userId,
       amount,
       currency,
+      orderPlacedAt,
       paymentIntent: pendingIntent,
     });
 
@@ -539,6 +558,7 @@ exports.createPayment = async (req, res) => {
         orderId,
         orderNumber,
         userId: String(req.user.userId || ""),
+        ...(orderPlacedAt ? { orderPlacedAt: orderPlacedAt.toISOString() } : {}),
       },
     });
   } catch (error) {
@@ -563,6 +583,7 @@ exports.createPayment = async (req, res) => {
     userId: req.user.userId,
     amount,
     currency,
+    orderPlacedAt,
     paymentIntent,
   });
 
@@ -613,6 +634,7 @@ exports.syncStripePayment = async (req, res) => {
   const currency = String(paymentIntent.currency || "INR").trim().toUpperCase();
   const amount = fromMinorUnits(paymentIntent.amount, currency);
   const orderNumber = String(paymentIntent.metadata?.orderNumber || "").trim();
+  const intentOrderPlacedAt = toDateOrNull(paymentIntent.metadata?.orderPlacedAt);
 
   const existingPayment = await Payment.findOne({
     orderId,
@@ -627,6 +649,7 @@ exports.syncStripePayment = async (req, res) => {
     userId: req.user.userId,
     amount,
     currency,
+    orderPlacedAt: existingPayment?.orderPlacedAt || intentOrderPlacedAt,
     paymentIntent,
   });
 
@@ -780,6 +803,7 @@ exports.handleOrderEvents = async (req, res) => {
       if (!orderId) {
         return res.status(400).json({ message: "payload.orderId is required for order.created" });
       }
+      const parsedOrderPlacedAt = toDateOrNull(payload.placedAt) || new Date();
 
       try {
         const createdPayment = await Payment.findOneAndUpdate(
@@ -799,9 +823,11 @@ exports.handleOrderEvents = async (req, res) => {
               method: "stripe",
               status: "pending",
               gatewayStatus: "awaiting_intent",
+              orderPlacedAt: parsedOrderPlacedAt,
               message: "Awaiting Stripe payment initialization",
               metadata: {
                 source: "order.event",
+                orderPlacedAt: parsedOrderPlacedAt.toISOString(),
               },
               history: [
                 {
@@ -817,6 +843,21 @@ exports.handleOrderEvents = async (req, res) => {
             setDefaultsOnInsert: true,
           }
         );
+
+        if (createdPayment && !createdPayment.orderPlacedAt) {
+          await Payment.updateOne(
+            {
+              _id: createdPayment._id,
+              $or: [{ orderPlacedAt: null }, { orderPlacedAt: { $exists: false } }],
+            },
+            {
+              $set: {
+                orderPlacedAt: parsedOrderPlacedAt,
+                "metadata.orderPlacedAt": parsedOrderPlacedAt.toISOString(),
+              },
+            }
+          );
+        }
 
         await invalidatePaymentCache({
           paymentId: String(createdPayment?._id || ""),

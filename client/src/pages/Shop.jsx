@@ -6,6 +6,18 @@ import { CartContext } from "../context/CartContext";
 import { AuthContext } from "../context/AuthContext";
 import MedicineBrowseBar from "../components/common/MedicineBrowseBar";
 
+const PRICE_RANGE_OPTIONS = [
+  { id: "all", label: "All Prices", min: 0, max: Number.POSITIVE_INFINITY },
+  { id: "under-200", label: "Under Rs 200", min: 0, max: 199 },
+  { id: "200-499", label: "Rs 200 - Rs 499", min: 200, max: 499 },
+  { id: "500-999", label: "Rs 500 - Rs 999", min: 500, max: 999 },
+  { id: "1000-1999", label: "Rs 1,000 - Rs 1,999", min: 1000, max: 1999 },
+  { id: "2000-plus", label: "Rs 2,000 & Above", min: 2000, max: Number.POSITIVE_INFINITY },
+];
+
+const getPriceRangeById = (rangeId) =>
+  PRICE_RANGE_OPTIONS.find((range) => range.id === rangeId) || PRICE_RANGE_OPTIONS[0];
+
 const Shop = () => {
   const [medicines, setMedicines] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -14,7 +26,12 @@ const Shop = () => {
   const [error, setError] = useState("");
   const [selectedCategories, setSelectedCategories] = useState([]);
   const [selectedBrands, setSelectedBrands] = useState([]);
-  const [priceLimit, setPriceLimit] = useState(0);
+  const [selectedPriceRange, setSelectedPriceRange] = useState("all");
+  const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
+  const [draftSelectedCategories, setDraftSelectedCategories] = useState([]);
+  const [draftSelectedBrands, setDraftSelectedBrands] = useState([]);
+  const [draftSelectedPriceRange, setDraftSelectedPriceRange] = useState("all");
+  const [activeMobileFilterSection, setActiveMobileFilterSection] = useState("category");
   const [openSections, setOpenSections] = useState({
     category: true,
     brands: true,
@@ -83,22 +100,39 @@ const Shop = () => {
     [medicines],
   );
 
-  const maxPrice = useMemo(
-    () => medicines.reduce((highest, medicine) => Math.max(highest, Number(medicine.price) || 0), 0),
-    [medicines],
-  );
-
-  useEffect(() => {
-    setPriceLimit(maxPrice);
-  }, [maxPrice]);
-
   useEffect(() => {
     setSelectedCategories((current) => current.filter((item) => categoryOptions.includes(item)));
   }, [categoryOptions]);
 
   useEffect(() => {
+    setDraftSelectedCategories((current) => current.filter((item) => categoryOptions.includes(item)));
+  }, [categoryOptions]);
+
+  useEffect(() => {
     setSelectedBrands((current) => current.filter((item) => brandOptions.includes(item)));
   }, [brandOptions]);
+
+  useEffect(() => {
+    setDraftSelectedBrands((current) => current.filter((item) => brandOptions.includes(item)));
+  }, [brandOptions]);
+
+  const selectedPriceRangeOption = useMemo(
+    () => getPriceRangeById(selectedPriceRange),
+    [selectedPriceRange],
+  );
+
+  useEffect(() => {
+    if (!isMobileFiltersOpen) {
+      return undefined;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isMobileFiltersOpen]);
 
   const filteredMedicines = useMemo(() => {
     return medicines.filter((medicine) => {
@@ -106,11 +140,13 @@ const Shop = () => {
         selectedCategories.length === 0 || selectedCategories.includes(String(medicine.category || "").trim());
       const matchesBrand =
         selectedBrands.length === 0 || selectedBrands.includes(String(medicine.manufacturer || "").trim());
-      const matchesPrice = (Number(medicine.price) || 0) <= priceLimit;
+      const medicinePrice = Number(medicine.price) || 0;
+      const matchesPrice =
+        medicinePrice >= selectedPriceRangeOption.min && medicinePrice <= selectedPriceRangeOption.max;
 
       return matchesCategory && matchesBrand && matchesPrice;
     });
-  }, [medicines, priceLimit, selectedBrands, selectedCategories]);
+  }, [medicines, selectedBrands, selectedCategories, selectedPriceRangeOption]);
 
   const requireLogin = () => {
     if (!user) {
@@ -189,13 +225,139 @@ const Shop = () => {
   const getStockLimit = (medicine) =>
     Math.min(20, Math.max(0, Number(medicine.availableStock ?? medicine.stock) || 0));
 
+  const openMobileFilters = () => {
+    setDraftSelectedCategories([...selectedCategories]);
+    setDraftSelectedBrands([...selectedBrands]);
+    setDraftSelectedPriceRange(selectedPriceRange);
+    setActiveMobileFilterSection("category");
+    setIsMobileFiltersOpen(true);
+  };
+
+  const closeMobileFilters = () => {
+    setIsMobileFiltersOpen(false);
+  };
+
+  const applyMobileFilters = () => {
+    setSelectedCategories([...draftSelectedCategories]);
+    setSelectedBrands([...draftSelectedBrands]);
+    setSelectedPriceRange(draftSelectedPriceRange);
+    setIsMobileFiltersOpen(false);
+  };
+
+  const renderCategoryOptions = (selectedCategoriesState, setSelectedCategoriesState) => (
+    <div className="shop-filter-options">
+      {categoryOptions.length > 0 ? (
+        categoryOptions.map((option) => (
+          <label key={option} className="shop-filter-check">
+            <input
+              type="checkbox"
+              checked={selectedCategoriesState.includes(option)}
+              onChange={() => toggleFilterOption(option, setSelectedCategoriesState)}
+            />
+            <span>{option}</span>
+          </label>
+        ))
+      ) : (
+        <p className="shop-filter-empty">No categories available</p>
+      )}
+    </div>
+  );
+
+  const renderBrandOptions = (selectedBrandsState, setSelectedBrandsState) => (
+    <div className="shop-filter-options">
+      {brandOptions.length > 0 ? (
+        brandOptions.map((option) => (
+          <label key={option} className="shop-filter-check">
+            <input
+              type="checkbox"
+              checked={selectedBrandsState.includes(option)}
+              onChange={() => toggleFilterOption(option, setSelectedBrandsState)}
+            />
+            <span>{option}</span>
+          </label>
+        ))
+      ) : (
+        <p className="shop-filter-empty">No brands available</p>
+      )}
+    </div>
+  );
+
+  const renderPriceOptions = (selectedPriceRangeState, setSelectedPriceRangeState, inputGroupName) => (
+    <div className="shop-filter-options shop-price-range-options">
+      {PRICE_RANGE_OPTIONS.map((option) => (
+        <label key={option.id} className="shop-filter-check shop-filter-radio">
+          <input
+            type="radio"
+            name={inputGroupName}
+            checked={selectedPriceRangeState === option.id}
+            onChange={() => setSelectedPriceRangeState(option.id)}
+          />
+          <span>{option.label}</span>
+        </label>
+      ))}
+    </div>
+  );
+
+  const renderFilterSections = ({
+    selectedCategoriesState,
+    setSelectedCategoriesState,
+    selectedBrandsState,
+    setSelectedBrandsState,
+    selectedPriceRangeState,
+    setSelectedPriceRangeState,
+    priceRangeInputGroupName,
+  }) => (
+    <>
+      <section className="shop-filter-section">
+        <button
+          type="button"
+          className="shop-filter-toggle"
+          onClick={() => toggleSection("category")}
+        >
+          <span>Category</span>
+          <span className={`shop-filter-caret ${openSections.category ? "is-open" : ""}`} />
+        </button>
+        {openSections.category ? renderCategoryOptions(selectedCategoriesState, setSelectedCategoriesState) : null}
+      </section>
+
+      <section className="shop-filter-section">
+        <button
+          type="button"
+          className="shop-filter-toggle"
+          onClick={() => toggleSection("brands")}
+        >
+          <span>Brands</span>
+          <span className={`shop-filter-caret ${openSections.brands ? "is-open" : ""}`} />
+        </button>
+        {openSections.brands ? renderBrandOptions(selectedBrandsState, setSelectedBrandsState) : null}
+      </section>
+
+      <section className="shop-filter-section">
+        <button
+          type="button"
+          className="shop-filter-toggle"
+          onClick={() => toggleSection("price")}
+        >
+          <span>Price</span>
+          <span className={`shop-filter-caret ${openSections.price ? "is-open" : ""}`} />
+        </button>
+        {openSections.price
+          ? renderPriceOptions(
+              selectedPriceRangeState,
+              setSelectedPriceRangeState,
+              priceRangeInputGroupName,
+            )
+          : null}
+      </section>
+    </>
+  );
+
+  const welcomeName = String(user?.name || "").trim();
+
   return (
     <main className="page-wrap shop-page">
-      <MedicineBrowseBar mode="shop" />
-      <h1 className="page-title">Order Medicines Online</h1>
-      <p className="page-subtitle">
-        Browse verified medicines, add to cart, and book a pickup slot near you.
-      </p>
+      <MedicineBrowseBar mode="shop" onFilterClick={openMobileFilters} />
+      <h1 className="page-title shop-welcome-title">{welcomeName ? `Welcome, ${welcomeName}` : "Welcome"}</h1>
 
       <div className="shop-content-layout">
         <section className="shop-results-column">
@@ -302,93 +464,97 @@ const Shop = () => {
           <div className="shop-filters-head">
             <h2>Filters</h2>
           </div>
-
-          <section className="shop-filter-section">
-            <button
-              type="button"
-              className="shop-filter-toggle"
-              onClick={() => toggleSection("category")}
-            >
-              <span>Category</span>
-              <span className={`shop-filter-caret ${openSections.category ? "is-open" : ""}`} />
-            </button>
-            {openSections.category ? (
-              <div className="shop-filter-options">
-                {categoryOptions.length > 0 ? (
-                  categoryOptions.map((option) => (
-                    <label key={option} className="shop-filter-check">
-                      <input
-                        type="checkbox"
-                        checked={selectedCategories.includes(option)}
-                        onChange={() => toggleFilterOption(option, setSelectedCategories)}
-                      />
-                      <span>{option}</span>
-                    </label>
-                  ))
-                ) : (
-                  <p className="shop-filter-empty">No categories available</p>
-                )}
-              </div>
-            ) : null}
-          </section>
-
-          <section className="shop-filter-section">
-            <button
-              type="button"
-              className="shop-filter-toggle"
-              onClick={() => toggleSection("brands")}
-            >
-              <span>Brands</span>
-              <span className={`shop-filter-caret ${openSections.brands ? "is-open" : ""}`} />
-            </button>
-            {openSections.brands ? (
-              <div className="shop-filter-options">
-                {brandOptions.length > 0 ? (
-                  brandOptions.map((option) => (
-                    <label key={option} className="shop-filter-check">
-                      <input
-                        type="checkbox"
-                        checked={selectedBrands.includes(option)}
-                        onChange={() => toggleFilterOption(option, setSelectedBrands)}
-                      />
-                      <span>{option}</span>
-                    </label>
-                  ))
-                ) : (
-                  <p className="shop-filter-empty">No brands available</p>
-                )}
-              </div>
-            ) : null}
-          </section>
-
-          <section className="shop-filter-section">
-            <button
-              type="button"
-              className="shop-filter-toggle"
-              onClick={() => toggleSection("price")}
-            >
-              <span>Price</span>
-              <span className={`shop-filter-caret ${openSections.price ? "is-open" : ""}`} />
-            </button>
-            {openSections.price ? (
-              <div className="shop-filter-options shop-price-filter">
-                <p className="shop-price-range">
-                  Rs 0 - Rs {Math.round(priceLimit || maxPrice).toLocaleString("en-IN")}
-                </p>
-                <input
-                  className="shop-price-slider"
-                  type="range"
-                  min="0"
-                  max={Math.max(1, Math.ceil(maxPrice))}
-                  step="1"
-                  value={Math.min(priceLimit, Math.max(1, Math.ceil(maxPrice)))}
-                  onChange={(event) => setPriceLimit(Number(event.target.value))}
-                />
-              </div>
-            ) : null}
-          </section>
+          {renderFilterSections({
+            selectedCategoriesState: selectedCategories,
+            setSelectedCategoriesState: setSelectedCategories,
+            selectedBrandsState: selectedBrands,
+            setSelectedBrandsState: setSelectedBrands,
+            selectedPriceRangeState: selectedPriceRange,
+            setSelectedPriceRangeState: setSelectedPriceRange,
+            priceRangeInputGroupName: "desktop-price-range",
+          })}
         </aside>
       </div>
+
+      {isMobileFiltersOpen ? (
+        <div className="shop-filter-modal-backdrop" role="dialog" aria-modal="true" aria-label="Filters">
+          <div className="panel shop-filter-modal">
+            <div className="shop-filter-modal-head">
+              <h2>Filters</h2>
+              <button type="button" className="shop-filter-close-btn" onClick={closeMobileFilters}>
+                Close
+              </button>
+            </div>
+
+            <div className="shop-filter-modal-body">
+              <div className="shop-filter-modal-layout">
+                <nav className="shop-filter-mobile-nav" aria-label="Filter sections">
+                  <button
+                    type="button"
+                    className={`shop-filter-mobile-nav-btn ${
+                      activeMobileFilterSection === "category" ? "is-active" : ""
+                    }`}
+                    onClick={() => setActiveMobileFilterSection("category")}
+                  >
+                    Category
+                  </button>
+                  <button
+                    type="button"
+                    className={`shop-filter-mobile-nav-btn ${
+                      activeMobileFilterSection === "brands" ? "is-active" : ""
+                    }`}
+                    onClick={() => setActiveMobileFilterSection("brands")}
+                  >
+                    Brands
+                  </button>
+                  <button
+                    type="button"
+                    className={`shop-filter-mobile-nav-btn ${
+                      activeMobileFilterSection === "price" ? "is-active" : ""
+                    }`}
+                    onClick={() => setActiveMobileFilterSection("price")}
+                  >
+                    Price
+                  </button>
+                </nav>
+
+                <div className="shop-filter-mobile-content">
+                  <h3 className="shop-filter-mobile-section-title">
+                    {activeMobileFilterSection === "category"
+                      ? "Category"
+                      : activeMobileFilterSection === "brands"
+                        ? "Brands"
+                        : "Price"}
+                  </h3>
+
+                  {activeMobileFilterSection === "category"
+                    ? renderCategoryOptions(draftSelectedCategories, setDraftSelectedCategories)
+                    : null}
+                  {activeMobileFilterSection === "brands"
+                    ? renderBrandOptions(draftSelectedBrands, setDraftSelectedBrands)
+                    : null}
+                  {activeMobileFilterSection === "price"
+                    ? renderPriceOptions(
+                        draftSelectedPriceRange,
+                        setDraftSelectedPriceRange,
+                        "mobile-price-range",
+                      )
+                    : null}
+                </div>
+              </div>
+            </div>
+
+            <div className="shop-filter-modal-actions">
+              <button type="button" className="btn-secondary" onClick={closeMobileFilters}>
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" onClick={applyMobileFilters}>
+                Apply Filters
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 };

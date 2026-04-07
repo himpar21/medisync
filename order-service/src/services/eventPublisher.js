@@ -81,6 +81,7 @@ async function processPendingEvents() {
   try {
     const now = new Date();
     const dueEvents = await OutboxEvent.find({
+      eventType: /^order\./,
       status: "pending",
       nextAttemptAt: { $lte: now },
     })
@@ -91,6 +92,7 @@ async function processPendingEvents() {
       const claimed = await OutboxEvent.findOneAndUpdate(
         {
           _id: event._id,
+          eventType: /^order\./,
           status: "pending",
           nextAttemptAt: { $lte: new Date() },
         },

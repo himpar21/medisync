@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { SlidersHorizontal } from "lucide-react";
 import CustomSelect from "./CustomSelect";
 import { getInventoryCategories, getMedicines } from "../../services/inventoryService";
 
@@ -21,7 +22,7 @@ function buildSearchParams(query, category) {
   return params;
 }
 
-const MedicineBrowseBar = ({ mode = "redirect" }) => {
+const MedicineBrowseBar = ({ mode = "redirect", onFilterClick = null }) => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const rootRef = useRef(null);
@@ -186,6 +187,23 @@ const MedicineBrowseBar = ({ mode = "redirect" }) => {
     navigate(`/medicines/${medicineId}`);
   };
 
+  const handleFilterClick = () => {
+    if (typeof onFilterClick === "function") {
+      onFilterClick();
+      return;
+    }
+
+    if (mode !== "shop") {
+      goToShop(query, category);
+      return;
+    }
+
+    const filterPanel = document.querySelector(".shop-filters-panel");
+    if (filterPanel) {
+      filterPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
   return (
     <section ref={rootRef} className="toolbar shop-toolbar page-medicine-browse-bar">
       <div className="page-browse-search-wrap">
@@ -221,12 +239,18 @@ const MedicineBrowseBar = ({ mode = "redirect" }) => {
         ) : null}
       </div>
 
-      <CustomSelect
-        className="shop-category-select"
-        value={category}
-        options={categoryOptions}
-        onChange={handleCategoryChange}
-      />
+      <div className="shop-browse-actions">
+        <CustomSelect
+          className="shop-category-select"
+          value={category}
+          options={categoryOptions}
+          onChange={handleCategoryChange}
+        />
+        <button type="button" className="btn-secondary shop-filter-btn" onClick={handleFilterClick}>
+          <SlidersHorizontal size={16} />
+          <span>Filters</span>
+        </button>
+      </div>
     </section>
   );
 };

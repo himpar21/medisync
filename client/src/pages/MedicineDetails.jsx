@@ -413,6 +413,55 @@ const MedicineDetails = () => {
           </section>
         </aside>
       </section>
+
+      <section className="panel medicine-mobile-buy-bar" aria-label="Quick purchase bar">
+        <div className="medicine-mobile-buy-meta">
+          <strong className="medicine-mobile-buy-price">Rs {price.toFixed(2)}</strong>
+          <span className={`status-pill ${availabilityStatusClass}`}>{availabilityLabel}</span>
+        </div>
+
+        <div className="medicine-mobile-buy-controls">
+          {inCartQty > 0 ? (
+            <>
+              <div className="qty-stepper medicine-mobile-qty-stepper">
+                <button
+                  className="qty-btn"
+                  type="button"
+                  onClick={handleDecreaseQty}
+                  disabled={cartLoading}
+                >
+                  -
+                </button>
+                <span className="qty-value">{inCartQty}</span>
+                <button
+                  className="qty-btn"
+                  type="button"
+                  onClick={handleIncreaseQty}
+                  disabled={!canIncrease || cartLoading}
+                >
+                  +
+                </button>
+              </div>
+              <button
+                type="button"
+                className="btn-secondary medicine-mobile-cart-btn"
+                onClick={handleGoToCart}
+              >
+                Cart
+              </button>
+            </>
+          ) : (
+            <button
+              className="btn-primary medicine-mobile-add-btn"
+              type="button"
+              onClick={handleAddToCart}
+              disabled={stockLimit <= 0 || cartLoading}
+            >
+              {stockLimit > 0 ? "Add to Cart" : "Out of Stock"}
+            </button>
+          )}
+        </div>
+      </section>
     </main>
   );
 };

@@ -2,11 +2,12 @@ const axios = require("axios");
 const { randomUUID } = require("node:crypto");
 const OutboxEvent = require("../models/OutboxEvent");
 
-const ANALYTICS_EVENT_URL = process.env.ANALYTICS_EVENT_URL || "";
-const ORDER_SERVICE_INTERNAL_URL =
-  process.env.ORDER_SERVICE_INTERNAL_URL || "http://127.0.0.1:5003/api/orders/internal";
+const ANALYTICS_EVENT_URL = String(process.env.ANALYTICS_EVENT_URL || "").trim();
+const ORDER_SERVICE_INTERNAL_URL = String(
+  process.env.ORDER_SERVICE_INTERNAL_URL || "http://127.0.0.1:5003/api/orders/internal"
+).trim();
 const INTERNAL_SERVICE_SECRET = process.env.INTERNAL_SERVICE_SECRET || "";
-const NOTIFICATION_WEBHOOK_URL = process.env.NOTIFICATION_WEBHOOK_URL || "";
+const NOTIFICATION_WEBHOOK_URL = String(process.env.NOTIFICATION_WEBHOOK_URL || "").trim();
 
 const OUTBOX_POLL_MS = Math.max(500, Number(process.env.PAYMENT_OUTBOX_POLL_MS || 1500));
 const OUTBOX_BATCH_SIZE = Math.max(1, Number(process.env.PAYMENT_OUTBOX_BATCH_SIZE || 20));
@@ -121,6 +122,17 @@ function isOrderSyncCritical(event) {
   return Boolean(event?.payload?.orderSync?.orderId);
 }
 
+function isCriticalTarget(target) {
+  return target?.bodyType === "order_sync" || target?.name === "order-service";
+}
+
+function summarizeFailures(failures) {
+  return failures
+    .map((failure) => `${failure.target?.name || failure.target?.url || "unknown-target"}: ${failure.message}`)
+    .join(" | ")
+    .slice(0, 1000);
+}
+
 async function dispatchEvent(event) {
   const results = await Promise.allSettled(
     event.targets.map((target) => dispatchTarget(event, target))
@@ -135,15 +147,21 @@ async function dispatchEvent(event) {
     }));
 
   if (!failures.length) {
-    return;
+    return {
+      nonCriticalFailures: [],
+    };
   }
 
-  const errorSummary = failures
-    .map((failure) => `${failure.target?.name || failure.target?.url || "unknown-target"}: ${failure.message}`)
-    .join(" | ")
-    .slice(0, 1000);
+  const criticalFailures = failures.filter((failure) => isCriticalTarget(failure.target));
+  const nonCriticalFailures = failures.filter((failure) => !isCriticalTarget(failure.target));
 
-  throw new Error(errorSummary);
+  if (criticalFailures.length) {
+    throw new Error(summarizeFailures(criticalFailures));
+  }
+
+  return {
+    nonCriticalFailures,
+  };
 }
 
 let workerTimer = null;
@@ -156,9 +174,19 @@ async function processOutboxBatch() {
   isWorkerRunning = true;
 
   try {
+    const now = new Date();
     const dueEvents = await OutboxEvent.find({
-      status: "pending",
-      nextAttemptAt: { $lte: new Date() },
+      eventType: /^payment\./,
+      $or: [
+        {
+          status: "pending",
+          nextAttemptAt: { $lte: now },
+        },
+        {
+          status: "failed",
+          "payload.orderSync.orderId": { $exists: true, $ne: "" },
+        },
+      ],
     })
       .sort({ nextAttemptAt: 1, createdAt: 1 })
       .limit(OUTBOX_BATCH_SIZE);
@@ -167,8 +195,17 @@ async function processOutboxBatch() {
       const claimed = await OutboxEvent.findOneAndUpdate(
         {
           _id: event._id,
-          status: "pending",
-          nextAttemptAt: { $lte: new Date() },
+          eventType: /^payment\./,
+          $or: [
+            {
+              status: "pending",
+              nextAttemptAt: { $lte: new Date() },
+            },
+            {
+              status: "failed",
+              "payload.orderSync.orderId": { $exists: true, $ne: "" },
+            },
+          ],
         },
         {
           $set: { status: "processing" },
@@ -182,13 +219,15 @@ async function processOutboxBatch() {
       }
 
       try {
-        await dispatchEvent(claimed);
+        const { nonCriticalFailures } = await dispatchEvent(claimed);
         await OutboxEvent.updateOne(
           { _id: claimed._id },
           {
             $set: {
               status: "sent",
-              lastError: "",
+              lastError: nonCriticalFailures.length
+                ? `non-critical delivery failed: ${summarizeFailures(nonCriticalFailures)}`
+                : "",
               nextAttemptAt: new Date(8640000000000000),
             },
           }
@@ -299,7 +338,7 @@ async function publishPaymentFailed(payment) {
     orderSync: {
       orderId: payment.orderId,
       paymentStatus: "failed",
-      status: "payment_pending",
+      status: "failed",
     },
     notification: toNotificationMessage(payment, "payment.failed"),
   });

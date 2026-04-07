@@ -4,7 +4,6 @@ const CACHE_NAMESPACE = String(process.env.AUTH_CACHE_NAMESPACE || "auth:cache:"
 const memoryCache = new Map();
 let redisClient = null;
 let redisEnabled = false;
-let redisBootstrapPromise = null;
 
 function namespacedKey(key) {
   return `${CACHE_NAMESPACE}${key}`;
@@ -68,7 +67,7 @@ async function bootstrapRedis() {
   }
 }
 
-redisBootstrapPromise = bootstrapRedis();
+bootstrapRedis();
 
 async function get(key) {
   const localValue = getMemoryValue(key);
@@ -76,12 +75,17 @@ async function get(key) {
     return localValue;
   }
 
-  await redisBootstrapPromise;
   if (!hasRedisConnection()) {
     return null;
   }
 
-  const rawValue = await redisClient.get(namespacedKey(key));
+  let rawValue = null;
+  try {
+    rawValue = await redisClient.get(namespacedKey(key));
+  } catch (_error) {
+    redisEnabled = false;
+    return null;
+  }
   if (!rawValue) {
     return null;
   }
@@ -98,25 +102,31 @@ async function get(key) {
 async function set(key, value, ttlSeconds = DEFAULT_TTL_SECONDS) {
   setMemoryValue(key, value, ttlSeconds);
 
-  await redisBootstrapPromise;
   if (!hasRedisConnection()) {
     return;
   }
 
-  await redisClient.set(namespacedKey(key), JSON.stringify(value), {
-    EX: ttlSeconds,
-  });
+  try {
+    await redisClient.set(namespacedKey(key), JSON.stringify(value), {
+      EX: ttlSeconds,
+    });
+  } catch (_error) {
+    redisEnabled = false;
+  }
 }
 
 async function del(key) {
   memoryCache.delete(key);
 
-  await redisBootstrapPromise;
   if (!hasRedisConnection()) {
     return;
   }
 
-  await redisClient.del(namespacedKey(key));
+  try {
+    await redisClient.del(namespacedKey(key));
+  } catch (_error) {
+    redisEnabled = false;
+  }
 }
 
 async function delByPrefix(prefix) {
@@ -126,15 +136,18 @@ async function delByPrefix(prefix) {
     }
   }
 
-  await redisBootstrapPromise;
   if (!hasRedisConnection()) {
     return;
   }
 
   const keyPrefix = namespacedKey(prefix);
-  const matchedKeys = await redisClient.keys(`${keyPrefix}*`);
-  if (matchedKeys.length) {
-    await redisClient.del(matchedKeys);
+  try {
+    const matchedKeys = await redisClient.keys(`${keyPrefix}*`);
+    if (matchedKeys.length) {
+      await redisClient.del(matchedKeys);
+    }
+  } catch (_error) {
+    redisEnabled = false;
   }
 }
 

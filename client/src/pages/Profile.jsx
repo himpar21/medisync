@@ -20,7 +20,7 @@ const Profile = () => {
     role === "admin" ? "Admin" : role === "pharmacist" ? "Pharmacist" : "Student";
 
   return (
-    <main className="page-wrap">
+    <main className="page-wrap profile-page">
       <MedicineBrowseBar />
       <h1 className="page-title">My Account</h1>
       <p className="page-subtitle">Profile details for your MediSync account.</p>

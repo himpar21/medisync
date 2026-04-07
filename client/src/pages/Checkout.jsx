@@ -2,22 +2,27 @@ import React, { useContext, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { CartContext } from "../context/CartContext";
+import { AuthContext } from "../context/AuthContext";
 import { checkoutCart, fetchPickupSlots } from "../services/orderService";
 import MedicineBrowseBar from "../components/common/MedicineBrowseBar";
 import CustomSelect from "../components/common/CustomSelect";
+import { buildAddressConfig } from "../utils/addressOptions";
 
 const STRIPE_MIN_AMOUNT_INR = 50;
 
 const Checkout = () => {
   const { cart, refreshCart } = useContext(CartContext);
+  const { user } = useContext(AuthContext);
   const location = useLocation();
   const [slots, setSlots] = useState([]);
   const [slotId, setSlotId] = useState("");
   const [note, setNote] = useState("");
   const [placingOrder, setPlacingOrder] = useState(false);
   const navigate = useNavigate();
-  const selectedAddress =
-    location.state?.selectedAddress || localStorage.getItem("selectedAddress") || "";
+  const [selectedAddress, setSelectedAddress] = useState(() =>
+    location.state?.selectedAddress || localStorage.getItem("selectedAddress") || ""
+  );
+  const addressOptions = useMemo(() => buildAddressConfig(user).options, [user]);
 
   useEffect(() => {
     if (!selectedAddress) {
@@ -25,6 +30,23 @@ const Checkout = () => {
       navigate("/cart");
     }
   }, [selectedAddress, navigate]);
+
+  useEffect(() => {
+    if (!addressOptions.length) {
+      setSelectedAddress("");
+      localStorage.removeItem("selectedAddress");
+      return;
+    }
+
+    if (!addressOptions.includes(selectedAddress)) {
+      const nextAddress = location.state?.selectedAddress || localStorage.getItem("selectedAddress") || addressOptions[0];
+      setSelectedAddress(nextAddress);
+      localStorage.setItem("selectedAddress", nextAddress);
+      return;
+    }
+
+    localStorage.setItem("selectedAddress", selectedAddress);
+  }, [addressOptions, selectedAddress, location.state]);
 
   useEffect(() => {
     let mounted = true;
@@ -129,10 +151,19 @@ const Checkout = () => {
             <h3 className="checkout-block-title">Address</h3>
             <div className="checkout-address-card">
               <div className="checkout-address-row">
-                <strong>{selectedAddress || "Address not selected"}</strong>
+                <strong className="checkout-address-value">{selectedAddress || "Address not selected"}</strong>
                 <Link to="/cart" className="btn-secondary checkout-address-link">
                   Change Address
                 </Link>
+              </div>
+              <div className="checkout-mobile-address-select-wrap">
+                <CustomSelect
+                  id="checkout-address-select"
+                  value={selectedAddress}
+                  options={addressOptions}
+                  onChange={setSelectedAddress}
+                  className="checkout-mobile-address-select checkout-field-select"
+                />
               </div>
             </div>
           </section>
@@ -143,7 +174,7 @@ const Checkout = () => {
               value={slotId}
               options={slotOptions}
               onChange={setSlotId}
-              style={{ width: "100%" }}
+              className="checkout-slot-select checkout-field-select"
             />
           </section>
 
@@ -186,7 +217,7 @@ const Checkout = () => {
 
             <button
               type="button"
-              className="btn-primary checkout-place-order-btn"
+              className="btn-primary checkout-place-order-btn checkout-place-order-btn-desktop"
               disabled={placingOrder || !selectedAddress || isBelowStripeMinimum}
               onClick={handlePlaceOrder}
             >
@@ -195,6 +226,23 @@ const Checkout = () => {
           </div>
         </aside>
       </section>
+
+      <div className="checkout-mobile-paybar">
+        <div className="checkout-mobile-paybar-inner">
+          <div className="checkout-mobile-paymeta">
+            <span>To Pay</span>
+            <strong>Rs {total.toFixed(2)}</strong>
+          </div>
+          <button
+            type="button"
+            className="btn-primary checkout-place-order-btn checkout-place-order-btn-mobile"
+            disabled={placingOrder || !selectedAddress || isBelowStripeMinimum}
+            onClick={handlePlaceOrder}
+          >
+            {placingOrder ? "Preparing Payment..." : "Continue to Payment"}
+          </button>
+        </div>
+      </div>
     </main>
   );
 };

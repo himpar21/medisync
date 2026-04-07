@@ -14,6 +14,30 @@ const formatMoney = (value) => `Rs ${Number(value || 0).toFixed(2)}`;
 const formatDateTime = (value) => (value ? new Date(value).toLocaleString() : "N/A");
 const formatDateOnly = (value) => (value ? new Date(value).toLocaleDateString() : "N/A");
 const normalizePaymentStatus = (value) => String(value || "").trim().toLowerCase();
+const formatStatusLabel = (value) =>
+  String(value || "")
+    .trim()
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+
+const getOrderHeadline = (order) => {
+  const paymentStatus = normalizePaymentStatus(order?.paymentStatus);
+  const orderStatus = normalizePaymentStatus(order?.status);
+
+  if (paymentStatus === "failed") {
+    return "Payment Failed";
+  }
+
+  if (paymentStatus === "pending" && ["placed", "payment_pending"].includes(orderStatus)) {
+    return "Payment Pending";
+  }
+
+  if (orderStatus === "cancelled") {
+    return "Order Cancelled";
+  }
+
+  return "Ordered";
+};
 
 const reconcilePaidOrders = async (orderItems) => {
   const unpaidOrders = orderItems.filter(
@@ -44,7 +68,7 @@ const reconcilePaidOrders = async (orderItems) => {
       return order;
     }
 
-    const shouldPromoteStatus = ["placed", "payment_pending"].includes(
+    const shouldPromoteStatus = ["placed", "payment_pending", "failed"].includes(
       normalizePaymentStatus(order.status)
     );
 
@@ -286,6 +310,11 @@ const Orders = () => {
     navigate(`/payments/${order.id}`, { state: { order } });
   };
 
+  const onViewDetails = (event, order) => {
+    event.stopPropagation();
+    setExpandedOrderId((current) => (current === order.id ? null : order.id));
+  };
+
   const onCloseRatingModal = () => {
     setRatingModalOrder(null);
     setRatingDraft({
@@ -367,6 +396,22 @@ const Orders = () => {
         {orders.map((order) => {
           const isExpanded = expandedOrderId === order.id;
           const savedRating = normalizeSavedOrderRating(orderRatings[order.id]);
+          const normalizedOrderStatus = normalizePaymentStatus(order.status);
+          const normalizedOrderPaymentStatus = normalizePaymentStatus(order.paymentStatus);
+          const isPaymentPending =
+            normalizedOrderPaymentStatus === "pending" &&
+            ["placed", "payment_pending"].includes(normalizedOrderStatus);
+          const isPaymentFailed = normalizedOrderPaymentStatus === "failed";
+          const isPaymentPaid = normalizedOrderPaymentStatus === "paid";
+          const normalizedDisplayStatus =
+            isPaymentPaid && ["failed", "placed", "payment_pending"].includes(normalizedOrderStatus)
+              ? "confirmed"
+              : normalizedOrderStatus;
+          const statusPillValue = isPaymentFailed
+            ? "payment_failed"
+            : isPaymentPending
+              ? "payment_pending"
+              : normalizedDisplayStatus;
           const orderIdLabel = order.orderNumber || order.id;
           const subtotal = Number(
             order.subtotal ??
@@ -389,8 +434,10 @@ const Orders = () => {
               <div className="order-card-head">
                 <div className="order-card-main">
                   <div className="order-card-label-row">
-                    <strong className="order-card-label">Ordered</strong>
-                    <span className={`status-pill status-${order.status}`}>{order.status}</span>
+                    <strong className="order-card-label">{getOrderHeadline(order)}</strong>
+                    <span className={`status-pill status-${statusPillValue}`}>
+                      {formatStatusLabel(statusPillValue)}
+                    </span>
                   </div>
                   <span className="muted">Placed: {formatDateTime(order.placedAt)}</span>
                 </div>
@@ -431,7 +478,7 @@ const Orders = () => {
               ) : null}
 
               <div className="order-card-actions">
-                {order.paymentStatus !== "paid" ? (
+                {isPaymentPending ? (
                   <button
                     type="button"
                     className="btn-primary"
@@ -441,25 +488,43 @@ const Orders = () => {
                     Complete Payment
                   </button>
                 ) : null}
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={(event) => onRateOrder(event, order)}
-                  style={{ padding: "8px 12px" }}
-                >
-                  {savedRating.experience
-                    ? `Rate Order (${savedRating.experience}/5)`
-                    : "Rate Order"}
-                </button>
-                <button
-                  type="button"
-                  className="btn-primary"
-                  disabled={reorderingOrderId === order.id}
-                  onClick={(event) => onOrderAgain(event, order)}
-                  style={{ padding: "8px 12px" }}
-                >
-                  {reorderingOrderId === order.id ? "Adding..." : "Order Again"}
-                </button>
+                {isPaymentPaid ? (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={(event) => onRateOrder(event, order)}
+                    style={{ padding: "8px 12px" }}
+                  >
+                    {savedRating.experience
+                      ? `Rate Order (${savedRating.experience}/5)`
+                      : "Rate Order"}
+                  </button>
+                ) : null}
+                {!isPaymentPending ? (
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={reorderingOrderId === order.id}
+                    onClick={(event) => onOrderAgain(event, order)}
+                    style={{ padding: "8px 12px" }}
+                  >
+                    {reorderingOrderId === order.id
+                      ? "Adding..."
+                      : isPaymentFailed
+                        ? "Reorder Medicines"
+                        : "Order Again"}
+                  </button>
+                ) : null}
+                {!isPaymentPaid ? (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={(event) => onViewDetails(event, order)}
+                    style={{ padding: "8px 12px" }}
+                  >
+                    {isExpanded ? "Hide Details" : "View Details"}
+                  </button>
+                ) : null}
               </div>
 
               {isExpanded ? (
@@ -481,11 +546,13 @@ const Orders = () => {
                         <strong>Address:</strong> {order.address || "N/A"}
                       </p>
                       <p className="order-info-line">
-                        <strong>Payment:</strong> {order.paymentStatus || "pending"}
+                        <strong>Payment:</strong> {formatStatusLabel(order.paymentStatus || "pending")}
                       </p>
                       <div className="order-info-line">
                         <strong>Status:</strong>
-                        <span className={`status-pill status-${order.status}`}>{order.status}</span>
+                        <span className={`status-pill status-${statusPillValue}`}>
+                          {formatStatusLabel(statusPillValue)}
+                        </span>
                       </div>
                     </section>
 
